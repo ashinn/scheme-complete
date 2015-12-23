@@ -1,7 +1,7 @@
 ;;; scheme-complete.el --- Smart tab completion for Scheme in Emacs
 
 ;;; Author: Alex Shinn
-;;; Version: 0.8.11
+;;; Version: 0.9.0
 
 ;;; This code is written by Alex Shinn and placed in the Public
 ;;; Domain.  All warranties are disclaimed.
@@ -60,6 +60,7 @@
 ;;; That's all there is to it.
 
 ;;; History:
+;;;  0.9.0: 2015/12/23 - R7RS support
 ;;; 0.8.11: 2013/02/20 - formatting for melpa packaging
 ;;; 0.8.10: 2010/01/31 - factoring out a `scheme-get-completions' utility
 ;;;                       (thanks to Scott Dolim), and not jumping to end
@@ -108,6 +109,98 @@
   (require 'scheme))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; You can set the `scheme-default-implementation' to your preferred
+;; implementation, for when we can't figure out the file from
+;; heuristics.  Alternately, in any given buffer, just
+;;
+;; (setq *scheme-current-implementation* whatever)
+
+(defvar *scheme-current-implementation* nil)
+(make-variable-buffer-local '*scheme-current-implementation*)
+
+(defvar *scheme-current-context* nil)
+(make-variable-buffer-local '*scheme-current-context*)
+
+;; most implementations use their name as the script name
+(defvar *scheme-interpreter-alist*
+  '(("chibi-scheme" . chibi)
+    ("csi"  . chicken)
+    ("gosh" . gauche)
+    ("gsi"  . gambit)
+    ))
+
+(defgroup scheme-complete nil
+  "Smart tab completion"
+  :group 'scheme)
+
+(defcustom scheme-default-implementation nil
+  "Default scheme implementation to provide completion for
+when scheme-complete can't infer the current implementation."
+  :type 'symbol
+  :group 'scheme-complete)
+
+(defcustom scheme-always-use-default-implementation-p nil
+  "Always use `scheme-default-implementation' instead of heuristics."
+  :type 'symbol
+  :group 'scheme-complete)
+
+(defcustom scheme-complete-smart-indent-p t
+  "Toggles using `scheme-smart-indent' for `scheme-complete-or-indent'."
+  :type 'boolean
+  :group 'scheme-complete)
+
+(defcustom scheme-indent-before-complete-p nil
+  "Toggles indenting the current line before completing."
+  :type 'boolean
+  :group 'scheme-complete)
+
+(defcustom scheme-complete-empty-tab-behavior 'complete
+  "Behavior for `scheme-complete-or-indent' when completing an empty symbol.
+A value of `complete' (the default) will complete all symbols
+elligible according to the normal type inference rules.  Since
+they are not being filtered by any prefix, the list may be long -
+you can scroll through it or switch to the *Completions* buffer
+to view it.  A value of `indent' will assume you meant to indent
+at that location, and `beep' will just beep and do nothing."
+  :type '(choice (const complete) (const indent) (const beep))
+  :group 'scheme-complete)
+
+(defcustom scheme-complete-from-end-of-symbol-p t
+  "If true jump to the end when completing from the middle of a symbol."
+  :type 'boolean
+  :group 'scheme-complete)
+
+(defcustom scheme-complete-cache-p t
+  "Toggles caching of module/load export information."
+  :type 'boolean
+  :group 'scheme-complete)
+
+(defcustom scheme-interleave-definitions-p nil
+  "Allow internal defines to be mixed with expressions."
+  :type 'boolean
+  :group 'scheme-complete)
+
+(defcustom scheme-complete-recursive-inference-p t
+  "Recursively infer types from imported modules rather than shallow parses."
+  :type 'boolean
+  :group 'scheme-complete)
+
+(defcustom *scheme-r7rs-extension* ".sld"
+  "File extension for R7RS library declarations."
+  :type 'string
+  :group 'scheme-complete)
+
+(defcustom *scheme-max-decl-file-search-depth* 5
+  "Maximum number of directories to backtrack looking for including libraries."
+  :type 'integer
+  :group 'scheme-complete)
+
+(defcustom *scheme-use-r7rs* t
+  "Set to nil to restore legacy behavior."
+  :type 'boolean
+  :group 'scheme-complete)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; info
 ;;
 ;; identifier type [doc-string no-type-display?]
@@ -123,227 +216,384 @@
 ;;   (string expander)
 ;;   (special type function [outer-function])
 
+(defvar *scheme-r7rs-lib-decl-info*
+  '((begin (syntax (body \.\.\.)))
+    (cond-expand (syntax (clause \.\.\.)))
+    (export (syntax identifier \.\.\.))
+    (import (special list scheme-available-modules))
+    (include (syntax filename \.\.\.))
+    (include-ci (syntax filename \.\.\.))
+    (include-library-declarations (syntax filename \.\.\.))))
+
+(defvar *scheme-r7rs-info*
+  `(((scheme base)
+     (_ (syntax) "auxiliary syntax")
+     (... (syntax) "auxiliary syntax")
+     (* (lambda (z1 \.\.\.) z))
+     (+ (lambda (z1 \.\.\.) z))
+     (- (lambda (z1 \.\.\.) z))
+     (/ (lambda (z1 \.\.\.) z))
+     (<= (lambda (x1 x2 \.\.\.) bool) "returns #t iff the arguments are monotonically nondecreasing")
+     (< (lambda (x1 x2 \.\.\.) bool) "returns #t iff the arguments are monotonically increasing")
+     (=> (syntax) "auxiliary syntax")
+     (= (lambda (z1 z2 \.\.\.) bool) "returns #t iff the arguments are all equal")
+     (>= (lambda (x1 x2 \.\.\.) bool) "returns #t iff the arguments are monotonically nonincreasing")
+     (> (lambda (x1 x2 \.\.\.) bool) "returns #t iff the arguments are monotonically decreasing")
+     (abs (lambda (x1) x2) "returns the absolute value of X")
+     (and (syntax (expr \.\.\.)) "evaluate EXPRs while true, return last")
+     (append (lambda (list \.\.\.) list) "concatenates the list arguments")
+     (apply (lambda ((lambda obj a) obj \.\.\.) a) "procedure application")
+     (assoc (lambda (obj list)) "the element of LIST whose car is equal? to OBJ")
+     (assq (lambda (obj list)) "the element of LIST whose car is eq? to OBJ")
+     (assv (lambda (obj list)) "the element of LIST whose car is eqv? to OBJ")
+     (begin (syntax (expr \.\.\.)) "evaluate each EXPR in turn and return the last")
+     (boolean? (lambda (obj) bool) "returns #t iff OBJ is #t or #f")
+     (boolean=? (lambda (bool1 bool2) bool))
+     (bytevector (lambda (i \.\.\.) bytevector))
+     (bytevector-copy (lambda (bytevector :optional start end) bytevector))
+     (bytevector-append (lambda (bytevector \.\.\.) bytevector))
+     (bytevector-copy! (lambda (bytevector i \.\.\. bytevector :optional start end) undefined))
+     (bytevector-length (lambda (bytevector) i))
+     (bytevector-u8-ref (lambda (bytevector i) i))
+     (bytevector-u8-set! (lambda (bytevector i i) undefined))
+     (bytevector? (lambda (obj) bool))
+     (caar (lambda (pair) obj))
+     (cadr (lambda (pair) obj))
+     (call-with-current-continuation (lambda (proc) obj) "goto on steroids")
+     (call-with-values (lambda (producer consumer) obj))
+     (call-with-port (lambda (port proc) obj))
+     (call/cc (lambda (proc) obj) "short for call-with-current-continuation")
+     (case (syntax (expr clause \.\.\.)) "look for EXPR among literal lists")
+     (car (lambda (pair) obj))
+     (cdr (lambda (pair) obj))
+     (cdar (lambda (pair) obj))
+     (cddr (lambda (pair) obj))
+     (ceiling (lambda (x1) n) "smallest integer not smaller than X")
+     (char->integer (lambda (ch) int))
+     (char<=? (lambda (ch1 ch2) bool))
+     (char<? (lambda (ch1 ch2) bool))
+     (char=? (lambda (ch1 ch2) bool))
+     (char>=? (lambda (ch1 ch2) bool))
+     (char>? (lambda (ch1 ch2) bool))
+     (char? (lambda (obj) bool) "returns #t iff OBJ is a character")
+     (complex? (lambda (obj) bool) "returns #t iff OBJ is a complex number")
+     (cond (syntax (clause \.\.\.)) "try each clause until one succeeds")
+     (cond-expand (syntax (clause \.\.\.)))
+     (cons (lambda (obj1 obj2) pair) "create a newly allocated pair")
+     (define-syntax (syntax (identifier body \.\.\.) undefined) "create a macro")
+     (define (syntax (identifier value) undefined) "define a new variable")
+     (define-values (syntax (identifier \.\.\.) expr))
+     (define-record-type (syntax name (make field \.\.\.) pred-name (field get set) \.\.\.))
+     (denominator (lambda (rational) n))
+     (do (syntax (vars finish body \.\.\.)) "simple iterator")
+     (dynamic-wind (lambda (before-thunk thunk after-thunk) obj))
+     (else (syntax) "auxiliary syntax")
+     (eq? (lambda (obj1 obj2) bool) "finer grained version of EQV?")
+     (equal? (lambda (obj1 obj2) bool) "recursive equivalence")
+     (eqv? (lambda (obj1 obj2) bool) "returns #t if OBJ1 and OBJ2 are the same object")
+     (error (lambda (msg args \.\.\.) error))
+     (error-object? (lambda (obj) bool))
+     (error-object-message (lambda (error) string))
+     (error-object-irritants (lambda (error) list))
+     (even? (lambda (n) bool))
+     (exact (lambda (z) z))
+     (exact-integer-sqrt (lambda (n) n))
+     (exact-integer? (lambda (z) bool))
+     (exact? (lambda (z) bool) "returns #t iff Z is exact")
+     (expt (lambda (z1 z2) z) "returns Z1 raised to the Z2 power")
+     (floor (lambda (x1) n) "largest integer not larger than X")
+     (for-each (lambda ((lambda obj a) obj \.\.\.) undefined) "apply PROC to each element of LIST in order")
+     (gcd (lambda (n1 \.\.\.) n) "greatest common divisor")
+     (floor/ (lambda (x1) (values n n)))
+     (floor-quotient (lambda (x1) n))
+     (floor-remainder (lambda (x1) n))
+     (truncate/ (lambda (x1) (values n n)))
+     (truncate-quotient (lambda (x1) n))
+     (truncate-remainder (lambda (x1) n))
+     (features (lambda () (list symbol)))
+     (guard (syntax ((var clause \.\.\.) body \.\.\.)))
+     (if (syntax (cond then else)) "conditional evaluation")
+     (include (syntax filename \.\.\.))
+     (include-ci (syntax filename \.\.\.))
+     (inexact (lambda (z) z))
+     (inexact? (lambda (z) bool) "returns #t iff Z is inexact")
+     (integer->char (lambda (int) ch))
+     (integer? (lambda (obj) bool) "returns #t iff OBJ is an integer")
+     (lambda (syntax (params body \.\.\.)) "procedure syntax")
+     (lcm (lambda (n2 \.\.\.) n) "least common multiple")
+     (length (lambda (list) n))
+     (let* (syntax (vars body \.\.\.)) "bind new local variables sequentially")
+     (let-syntax (syntax (syntaxes body \.\.\.)) "a local macro")
+     (letrec* (syntax (vars body \.\.\.)) "bind new local variables recursively in order")
+     (letrec-syntax (syntax (syntaxes body \.\.\.)) "a local macro")
+     (let-values (syntax (vars body \.\.\.)))
+     (let*-values (syntax (vars body \.\.\.)))
+     (letrec (syntax (vars body \.\.\.)) "bind new local variables recursively")
+     (let (syntax (vars body \.\.\.)) "bind new local variables in parallel")
+     (list-copy (lambda (list) list))
+     (list->string (lambda (list) str))
+     (list->vector (lambda (list) vec))
+     (list-ref (lambda (list k) obj) "returns the Kth element of LIST")
+     (list-set! (lambda (list k val) undefined))
+     (list-tail (lambda (list k) list) "returns the Kth cdr of LIST")
+     (list? (lambda (obj) bool) "returns #t iff OBJ is a proper list")
+     (list (lambda (obj \.\.\.) list) "returns a newly allocated list")
+     (make-bytevector (lambda (k :optional u8) bytevector))
+     (make-list (lambda (k :optional obj) list))
+     (make-parameter (lambda (init :optional converter) parameter))
+     (make-string (lambda (k :optional ch) str) "a new string of length k")
+     (make-vector (lambda (len :optional fill) vec) "a new vector of K elements")
+     (map (lambda ((lambda (obj1 . obj2) a) list \.\.\.) (list a)) "a new list of PROC applied to every element of LIST")
+     (max (lambda (x1 x2 \.\.\.) x3) "returns the maximum of the arguments")
+     (member (lambda (obj list)) "the sublist of LIST whose car is equal? to OBJ")
+     (memq (lambda (obj list)) "the sublist of LIST whose car is eq? to OBJ")
+     (memv (lambda (obj list)) "the sublist of LIST whose car is eqv? to OBJ")
+     (min (lambda (x1 x2 \.\.\.) x3) "returns the minimum of the arguments")
+     (modulo (lambda (n1 n2) n) "same sign as N2")
+     (negative? (lambda (x1) bool))
+     (not (lambda (obj) bool) "returns #t iff OBJ is false")
+     (null? (lambda (obj) bool) "returns #t iff OBJ is the empty list")
+     (number->string (lambda (z :optional radix) str))
+     (number? (lambda (obj) bool) "returns #t iff OBJ is a number")
+     (numerator (lambda (rational) n))
+     (odd? (lambda (n) bool))
+     (or (syntax (expr \.\.\.)) "return the first true EXPR")
+     (pair? (lambda (obj) bool) "returns #t iff OBJ is a pair")
+     (parameterize (syntax (((id value) \.\.\.) body \.\.\.)))
+     (positive? (lambda (x1) bool))
+     (procedure? (lambda (obj) bool) "returns #t iff OBJ is a procedure")
+     (quasiquote (syntax (expr)) "quote literals allowing escapes")
+     (quote (syntax (expr)) "represent EXPR literally without evaluating it")
+     (quotient (lambda (n1 n2) n) "integer division")
+     (raise-continuable (lambda (obj) error))
+     (raise (lambda (obj) error))
+     (rational? (lambda (obj) bool) "returns #t iff OBJ is a rational number")
+     (rationalize (lambda (x1 y) n) "rational number differing from X by at most Y")
+     (real? (lambda (obj) bool) "returns #t iff OBJ is a real number")
+     (remainder (lambda (n1 n2) n) "same sign as N1")
+     (reverse (lambda (list) list))
+     (round (lambda (x1) n) "round to even (banker's rounding)")
+     (set! (syntax (identifier value) undefined) "set the value of a variable")
+     (set-car! (lambda (pair obj) undefined))
+     (set-cdr! (lambda (pair obj) undefined))
+     (square (lambda (z) z))
+     (string->list (lambda (str) list))
+     (string->number (lambda (str :optional radix) z))
+     (string->symbol (lambda (str) symbol))
+     (string->vector (lambda (str) vector))
+     (string-append (lambda (str \.\.\.) str) "concatenate the string arguments")
+     (string-copy (lambda (str) str))
+     (string-copy! (lambda (str k str :optional start end) undefined))
+     (string-fill! (lambda (str ch) undefined) "set every char in STR to CH")
+     (string-for-each (lambda (proc str \.\.\.) undefined))
+     (string-length (lambda (str) n) "the number of characters in STR")
+     (string-map (lambda (proc str \.\.\.) str))
+     (string-ref (lambda (str i) ch) "the Ith character of STR")
+     (string-set! (lambda (str i ch) undefined) "set the Ith character of STR to CH")
+     (string<=? (lambda (str1 str2) bool))
+     (string<? (lambda (str1 str2) bool))
+     (string=? (lambda (str1 str2) bool))
+     (string>=? (lambda (str1 str2) bool))
+     (string>? (lambda (str1 str2) bool))
+     (string? (lambda (obj) bool) "returns #t iff OBJ is a string")
+     (string (lambda (ch \.\.\.) str) "a new string made of the char arguments")
+     (substring (lambda (str start end) str))
+     (symbol->string (lambda (symbol) str))
+     (symbol=? (lambda (symbol1 symbol2) bool))
+     (symbol? (lambda (obj) bool) "returns #t iff OBJ is a symbol")
+     (syntax-error (syntax (msg obj \.\.\.) error))
+     (syntax-rules (syntax (literals clauses \.\.\.) undefined) "simple macro language")
+     (truncate (lambda (x1) n) "drop fractional part")
+     (values (lambda (obj \.\.\.) (values obj \.\.\.)) "send multiple values to the calling continuation")
+     (unquote (syntax (expr)) "escape an expression inside quasiquote")
+     (unquote-splicing (syntax (expr)) "escape and splice a list expression inside quasiquote")
+     (vector-append (lambda (vec \.\.\.) vec))
+     (vector-copy (lambda (vec :optional start end) vec))
+     (vector-copy! (lambda (vec k vec :optional start end) undefined))
+     (vector->list (lambda (vec) list))
+     (vector->string (lambda (vec) str))
+     (vector-fill! (lambda (vec obj) undefined) "set every element in VEC to OBJ")
+     (vector-for-each (lambda (proc vec \.\.\.) undefined))
+     (vector-length (lambda (vec) n) "the number of elements in VEC")
+     (vector-map (lambda (proc vec \.\.\.) map))
+     (vector-ref (lambda (vec i) obj) "the Ith element of VEC")
+     (vector-set! (lambda (vec i obj) undefined) "set the Ith element of VEC to OBJ")
+     (vector? (lambda (obj) bool) "returns #t iff OBJ is a vector")
+     (vector (lambda (obj \.\.\.) vec))
+     (zero? (lambda (z) bool))
+     (when (syntax (expr body \.\.\.)))
+     (with-exception-handler (lambda (proc thunk)))
+     (unless (syntax (expr body \.\.\.)))
+     (binary-port? (lambda (obj) bool))
+     (char-ready? (lambda (:optional input-port) bool))
+     (textual-port? (lambda (obj) bool))
+     (close-port (lambda (port) undefined))
+     (close-input-port (lambda (input-port)))
+     (close-output-port (lambda (output-port)))
+     (current-error-port (lambda () output-port) "the default output for error messages")
+     (current-input-port (lambda () input-port) "the default input for read procedures")
+     (current-output-port (lambda () output-port) "the default output for write procedures")
+     (eof-object (lambda () eof-object))
+     (eof-object? (lambda (obj) bool) "returns #t iff OBJ is the end-of-file object")
+     (file-error? (lambda (obj) bool))
+     (flush-output-port (lambda (:optional output-port) undefined))
+     (get-output-string (lambda (output-port) str))
+     (get-output-bytevector (lambda (output-port) bytevector))
+     (input-port? (lambda (obj) bool) "returns #t iff OBJ is an input port")
+     (input-port-open? (lambda (input-port) bool))
+     (newline (lambda (:optional output-port) undefined) "send a linefeed")
+     (open-input-string (lambda (str) input-port))
+     (open-input-bytevector (lambda (bytevector) input-port))
+     (open-output-string (lambda () output-port))
+     (open-output-bytevector (lambda () output-port))
+     (output-port? (lambda (obj) bool) "returns #t iff OBJ is an output port")
+     (output-port-open? (lambda (output-port) bool))
+     (peek-char (lambda (:optional input-port) ch))
+     (peek-u8 (lambda (:optional input-port) u8))
+     (port? (lambda (obj) port))
+     (read-bytevector (lambda (k :optional input-port) bytevector))
+     (read-bytevector! (lambda (bytevector :optional input-port start end) undefined))
+     (read-char (lambda (:optional input-port) ch) "read a single character")
+     (read-error? (lambda (obj) error))
+     (read-line (lambda (:optional input-port) str))
+     (read-string (lambda (k :optional input-port)))
+     (read-u8 (lambda (:optional input-port) u8))
+     (string->utf8 (lambda (str :optional start end) bytevector))
+     (utf8->string (lambda (bytevector :optional start end) str))
+     (u8-ready? (lambda (:optional input-port) bool))
+     (write-bytevector (lambda (bytevector :optional output-port start end)))
+     (write-char (lambda (char :optional output-port) undefined) "write a single character")
+     (write-string (lambda (str :optional output-port start end)))
+     (write-u8 (lambda (u8 :optional output-port))))
+    ((scheme case-lambda)
+     (case-lambda (syntax (clauses \.\.\.) procedure)))
+    ((scheme char)
+     (char-alphabetic? (lambda (ch) bool))
+     (char-ci<=? (lambda (ch1 ch2 \.\.\.) bool))
+     (char-ci<? (lambda (ch1 ch2 \.\.\.) bool))
+     (char-ci=? (lambda (ch1 ch2 \.\.\.) bool))
+     (char-ci>=? (lambda (ch1 ch2 \.\.\.) bool))
+     (char-ci>? (lambda (ch1 ch2 \.\.\.) bool)))
+    ((scheme complex)
+     (angle (lambda (z) x1))
+     (imag-part (lambda (z) x1))
+     (magnitude (lambda (z) x1))
+     (make-polar (lambda (x1 x2) z) "create a complex number")
+     (make-rectangular (lambda (x1 x2) z) "create a complex number")
+     (real-part (lambda (z) x1)))
+    ((scheme cxr)
+     (caaaar (lambda (pair))) (caaadr (lambda (pair)))
+     (caadar (lambda (pair))) (caaddr (lambda (pair)))
+     (cadaar (lambda (pair))) (cadadr (lambda (pair)))
+     (caddar (lambda (pair))) (cadddr (lambda (pair)))
+     (cdaaar (lambda (pair))) (cdaadr (lambda (pair)))
+     (cdadar (lambda (pair))) (cdaddr (lambda (pair)))
+     (cddaar (lambda (pair))) (cddadr (lambda (pair)))
+     (cdddar (lambda (pair))) (cddddr (lambda (pair)))
+     (caaar (lambda (pair))) (caadr (lambda (pair)))
+     (cadar (lambda (pair))) (caddr (lambda (pair)))
+     (cdaar (lambda (pair))) (cdadr (lambda (pair)))
+     (cddar (lambda (pair))) (cdddr (lambda (pair))))
+    ((scheme eval)
+     (eval (lambda (expr env)))
+     (environment (lambda (list \.\.\.) env)))
+    ((scheme file)
+     (call-with-input-file (lambda (path proc) input-port))
+     (call-with-output-file (lambda (path proc) output-port))
+     (delete-file (lambda (path) undefined))
+     (file-exists? (lambda (path) bool))
+     (open-input-file (lambda (path) input-port))
+     (open-output-file (lambda (path) output-port))
+     (open-binary-input-file (lambda (path) input-port))
+     (open-binary-output-file (lambda (path) output-port))
+     (with-input-from-file (lambda (path thunk) obj))
+     (with-output-to-file (lambda (path thunk) obj)))
+    ((scheme inexact)
+     (acos (lambda (z) z) "arccosine function")
+     (asin (lambda (z) z) "arcsine function")
+     (atan (lambda (z) z) "arctangent function")
+     (cos (lambda (z) z) "cosine function")
+     (exp (lambda (z) z) "e^Z")
+     (finite? (lambda (z) bool))
+     (infinite? (lambda (z) bool))
+     (log (lambda (z) z) "natural logarithm of Z")
+     (nan? (lambda (z) bool))
+     (sin (lambda (z) z) "sine function")
+     (sqrt (lambda (z) z) "principal square root of Z")
+     (tan (lambda (z) z)))
+    ((scheme lazy)
+     (delay (syntax (expr)) "create a promise to evaluate EXPR")
+     (delay-force (syntax (expr)))
+     (force (lambda (promise) obj) "force the delayed value of PROMISE")
+     (make-promise (lambda (obj) promise))
+     (promise? (lambda (obj) bool)))
+    ((scheme load)
+     (load (lambda (path) undefined)))
+    ((scheme process-context)
+     (get-environment-variable (lambda (str) (or str bool)))
+     (get-environment-variables (lambda () (list (pair str str))))
+     (command-line (lambda () (list str)))
+     (emergency-exit (lambda (:optional obj) undefined))
+     (exit (lambda (:optional obj) undefined)))
+    ((scheme read)
+     (read (lambda (:optional input-port) obj)))
+    ((scheme repl)
+     (interaction-environment (lambda () env)))
+    ((scheme time)
+     (current-second (lambda () x1))
+     (current-jiffy (lambda () n))
+     (jiffies-per-second (lambda () n)))
+    ((scheme write)
+     (write (lambda (obj :optional output-port) undefined) "write an object, handling cycles")
+     (write-shared (lambda (obj :optional output-port) undefined) "write an object showing all shared structure")
+     (write-simple (lambda (obj :optional output-port) undefined) "write a non-cyclic object")
+     (display (lambda (obj :optional output-port) undefined) "display an object"))
+    ))
+
 (defvar *scheme-r5rs-info*
-  '((define (syntax (identifier value) undefined) "define a new variable")
-    (set! (syntax (identifier value) undefined) "set the value of a variable")
-    (let (syntax (vars body \.\.\.)) "bind new local variables in parallel")
-    (let* (syntax (vars body \.\.\.)) "bind new local variables sequentially")
-    (letrec (syntax (vars body \.\.\.)) "bind new local variables recursively")
-    (lambda (syntax (params body \.\.\.)) "procedure syntax")
-    (if (syntax (cond then else)) "conditional evaluation")
-    (cond (syntax (clause \.\.\.)) "try each clause until one succeeds")
-    (case (syntax (expr clause \.\.\.)) "look for EXPR among literal lists")
-    (delay (syntax (expr)) "create a promise to evaluate EXPR")
-    (and (syntax (expr \.\.\.)) "evaluate EXPRs while true, return last")
-    (or (syntax (expr \.\.\.)) "return the first true EXPR")
-    (begin (syntax (expr \.\.\.)) "evaluate each EXPR in turn and return the last")
-    (do (syntax (vars finish body \.\.\.)) "simple iterator")
-    (quote (syntax (expr)) "represent EXPR literally without evaluating it")
-    (quasiquote (syntax (expr)) "quote literals allowing escapes")
-    (unquote (syntax (expr)) "escape an expression inside quasiquote")
-    (unquote-splicing (syntax (expr)) "escape and splice a list expression inside quasiquote")
-    (define-syntax (syntax (identifier body \.\.\.) undefined) "create a macro")
-    (let-syntax (syntax (syntaxes body \.\.\.)) "a local macro")
-    (letrec-syntax (syntax (syntaxes body \.\.\.)) "a local macro")
-    (syntax-rules (syntax (literals clauses \.\.\.) undefined) "simple macro language")
-    (eqv? (lambda (obj1 obj2) bool) "returns #t if OBJ1 and OBJ2 are the same object")
-    (eq? (lambda (obj1 obj2) bool) "finer grained version of EQV?")
-    (equal? (lambda (obj1 obj2) bool) "recursive equivalence")
-    (not (lambda (obj) bool) "returns #t iff OBJ is false")
-    (boolean? (lambda (obj) bool) "returns #t iff OBJ is #t or #f")
-    (number? (lambda (obj) bool) "returns #t iff OBJ is a number")
-    (complex? (lambda (obj) bool) "returns #t iff OBJ is a complex number")
-    (real? (lambda (obj) bool) "returns #t iff OBJ is a real number")
-    (rational? (lambda (obj) bool) "returns #t iff OBJ is a rational number")
-    (integer? (lambda (obj) bool) "returns #t iff OBJ is an integer")
-    (exact? (lambda (z) bool) "returns #t iff Z is exact")
-    (inexact? (lambda (z) bool) "returns #t iff Z is inexact")
-    (= (lambda (z1 z2 \.\.\.) bool) "returns #t iff the arguments are all equal")
-    (< (lambda (x1 x2 \.\.\.) bool) "returns #t iff the arguments are monotonically increasing")
-    (> (lambda (x1 x2 \.\.\.) bool) "returns #t iff the arguments are monotonically decreasing")
-    (<= (lambda (x1 x2 \.\.\.) bool) "returns #t iff the arguments are monotonically nondecreasing")
-    (>= (lambda (x1 x2 \.\.\.) bool) "returns #t iff the arguments are monotonically nonincreasing")
-    (zero? (lambda (z) bool))
-    (positive? (lambda (x1) bool))
-    (negative? (lambda (x1) bool))
-    (odd? (lambda (n) bool))
-    (even? (lambda (n) bool))
-    (max (lambda (x1 x2 \.\.\.) x3) "returns the maximum of the arguments")
-    (min (lambda (x1 x2 \.\.\.) x3) "returns the minimum of the arguments")
-    (+ (lambda (z1 \.\.\.) z))
-    (* (lambda (z1 \.\.\.) z))
-    (- (lambda (z1 \.\.\.) z))
-    (/ (lambda (z1 \.\.\.) z))
-    (abs (lambda (x1) x2) "returns the absolute value of X")
-    (quotient (lambda (n1 n2) n) "integer division")
-    (remainder (lambda (n1 n2) n) "same sign as N1")
-    (modulo (lambda (n1 n2) n) "same sign as N2")
-    (gcd (lambda (n1 \.\.\.) n) "greatest common divisor")
-    (lcm (lambda (n2 \.\.\.) n) "least common multiple")
-    (numerator (lambda (rational) n))
-    (denominator (lambda (rational) n))
-    (floor (lambda (x1) n) "largest integer not larger than X")
-    (ceiling (lambda (x1) n) "smallest integer not smaller than X")
-    (truncate (lambda (x1) n) "drop fractional part")
-    (round (lambda (x1) n) "round to even (banker's rounding)")
-    (rationalize (lambda (x1 y) n) "rational number differing from X by at most Y")
-    (exp (lambda (z) z) "e^Z")
-    (log (lambda (z) z) "natural logarithm of Z")
-    (sin (lambda (z) z) "sine function")
-    (cos (lambda (z) z) "cosine function")
-    (tan (lambda (z) z) "tangent function")
-    (asin (lambda (z) z) "arcsine function")
-    (acos (lambda (z) z) "arccosine function")
-    (atan (lambda (z) z) "arctangent function")
-    (sqrt (lambda (z) z) "principal square root of Z")
-    (expt (lambda (z1 z2) z) "returns Z1 raised to the Z2 power")
-    (make-rectangular (lambda (x1 x2) z) "create a complex number")
-    (make-polar (lambda (x1 x2) z) "create a complex number")
-    (real-part (lambda (z) x1))
-    (imag-part (lambda (z) x1))
-    (magnitude (lambda (z) x1))
-    (angle (lambda (z) x1))
-    (exact->inexact (lambda (z) z))
-    (inexact->exact (lambda (z) z))
-    (number->string (lambda (z :optional radix) str))
-    (string->number (lambda (str :optional radix) z))
-    (pair? (lambda (obj) bool) "returns #t iff OBJ is a pair")
-    (cons (lambda (obj1 obj2) pair) "create a newly allocated pair")
-    (car (lambda (pair) obj))
-    (cdr (lambda (pair) obj))
-    (set-car! (lambda (pair obj) undefined))
-    (set-cdr! (lambda (pair obj) undefined))
-    (caar (lambda (pair) obj))
-    (cadr (lambda (pair) obj))
-    (cdar (lambda (pair) obj))
-    (cddr (lambda (pair) obj))
-    (caaar (lambda (pair) obj))
-    (caadr (lambda (pair) obj))
-    (cadar (lambda (pair) obj))
-    (caddr (lambda (pair) obj))
-    (cdaar (lambda (pair) obj))
-    (cdadr (lambda (pair) obj))
-    (cddar (lambda (pair) obj))
-    (cdddr (lambda (pair) obj))
-    (caaaar (lambda (pair) obj))
-    (caaadr (lambda (pair) obj))
-    (caadar (lambda (pair) obj))
-    (caaddr (lambda (pair) obj))
-    (cadaar (lambda (pair) obj))
-    (cadadr (lambda (pair) obj))
-    (caddar (lambda (pair) obj))
-    (cadddr (lambda (pair) obj))
-    (cdaaar (lambda (pair) obj))
-    (cdaadr (lambda (pair) obj))
-    (cdadar (lambda (pair) obj))
-    (cdaddr (lambda (pair) obj))
-    (cddaar (lambda (pair) obj))
-    (cddadr (lambda (pair) obj))
-    (cdddar (lambda (pair) obj))
-    (cddddr (lambda (pair) obj))
-    (null? (lambda (obj) bool) "returns #t iff OBJ is the empty list")
-    (list? (lambda (obj) bool) "returns #t iff OBJ is a proper list")
-    (list (lambda (obj \.\.\.) list) "returns a newly allocated list")
-    (length (lambda (list) n))
-    (append (lambda (list \.\.\.) list) "concatenates the list arguments")
-    (reverse (lambda (list) list))
-    (list-tail (lambda (list k) list) "returns the Kth cdr of LIST")
-    (list-ref (lambda (list k) obj) "returns the Kth element of LIST")
-    (memq (lambda (obj list)) "the sublist of LIST whose car is eq? to OBJ")
-    (memv (lambda (obj list)) "the sublist of LIST whose car is eqv? to OBJ")
-    (member (lambda (obj list)) "the sublist of LIST whose car is equal? to OBJ")
-    (assq (lambda (obj list)) "the element of LIST whose car is eq? to OBJ")
-    (assv (lambda (obj list)) "the element of LIST whose car is eqv? to OBJ")
-    (assoc (lambda (obj list)) "the element of LIST whose car is equal? to OBJ")
-    (symbol? (lambda (obj) bool) "returns #t iff OBJ is a symbol")
-    (symbol->string (lambda (symbol) str))
-    (string->symbol (lambda (str) symbol))
-    (char? (lambda (obj) bool) "returns #t iff OBJ is a character")
-    (char=? (lambda (ch1 ch2) bool))
-    (char<? (lambda (ch1 ch2) bool))
-    (char>? (lambda (ch1 ch2) bool))
-    (char<=? (lambda (ch1 ch2) bool))
-    (char>=? (lambda (ch1 ch2) bool))
-    (char-ci=? (lambda (ch1 ch2) bool))
-    (char-ci<? (lambda (ch1 ch2) bool))
-    (char-ci>? (lambda (ch1 ch2) bool))
-    (char-ci<=? (lambda (ch1 ch2) bool))
-    (char-ci>=? (lambda (ch1 ch2) bool))
-    (char-alphabetic? (lambda (ch) bool))
-    (char-numeric? (lambda (ch) bool))
-    (char-whitespace? (lambda (ch) bool))
-    (char-upper-case? (lambda (ch) bool))
-    (char-lower-case? (lambda (ch) bool))
-    (char->integer (lambda (ch) int))
-    (integer->char (lambda (int) ch))
-    (char-upcase (lambda (ch) ch))
-    (char-downcase (lambda (ch) ch))
-    (string? (lambda (obj) bool) "returns #t iff OBJ is a string")
-    (make-string (lambda (k :optional ch) str) "a new string of length k")
-    (string (lambda (ch \.\.\.) str) "a new string made of the char arguments")
-    (string-length (lambda (str) n) "the number of characters in STR")
-    (string-ref (lambda (str i) ch) "the Ith character of STR")
-    (string-set! (lambda (str i ch) undefined) "set the Ith character of STR to CH")
-    (string=? (lambda (str1 str2) bool))
-    (string-ci=? (lambda (str1 str2) bool))
-    (string<? (lambda (str1 str2) bool))
-    (string>? (lambda (str1 str2) bool))
-    (string<=? (lambda (str1 str2) bool))
-    (string>=? (lambda (str1 str2) bool))
-    (string-ci<? (lambda (str1 str2) bool))
-    (string-ci>? (lambda (str1 str2) bool))
-    (string-ci<=? (lambda (str1 str2) bool))
-    (string-ci>=? (lambda (str1 str2) bool))
-    (substring (lambda (str start end) str))
-    (string-append (lambda (str \.\.\.) str) "concatenate the string arguments")
-    (string->list (lambda (str) list))
-    (list->string (lambda (list) str))
-    (string-copy (lambda (str) str))
-    (string-fill! (lambda (str ch) undefined) "set every char in STR to CH")
-    (vector? (lambda (obj) bool) "returns #t iff OBJ is a vector")
-    (make-vector (lambda (len :optional fill) vec) "a new vector of K elements")
-    (vector (lambda (obj \.\.\.) vec))
-    (vector-length (lambda (vec) n) "the number of elements in VEC")
-    (vector-ref (lambda (vec i) obj) "the Ith element of VEC")
-    (vector-set! (lambda (vec i obj) undefined) "set the Ith element of VEC to OBJ")
-    (vector->list (lambda (vec) list))
-    (list->vector (lambda (list) vec))
-    (vector-fill! (lambda (vec obj) undefined) "set every element in VEC to OBJ")
-    (procedure? (lambda (obj) bool) "returns #t iff OBJ is a procedure")
-    (apply (lambda ((lambda obj a) obj \.\.\.) a) "procedure application")
-    (map (lambda ((lambda (obj1 . obj2) a) list \.\.\.) (list a)) "a new list of PROC applied to every element of LIST")
-    (for-each (lambda ((lambda obj a) obj \.\.\.) undefined) "apply PROC to each element of LIST in order")
-    (force (lambda (promise) obj) "force the delayed value of PROMISE")
-    (call-with-current-continuation (lambda (proc) obj) "goto on steroids")
-    (values (lambda (obj \.\.\.)) "send multiple values to the calling continuation")
-    (call-with-values (lambda (producer consumer) obj))
-    (dynamic-wind (lambda (before-thunk thunk after-thunk) obj))
-    (scheme-report-environment (lambda (int) env) "INT should be 5")
-    (null-environment (lambda (int) env) "INT should be 5")
-    (call-with-input-file (lambda (path proc) input-port))
-    (call-with-output-file (lambda (path proc) output-port))
-    (input-port? (lambda (obj) bool) "returns #t iff OBJ is an input port")
-    (output-port? (lambda (obj) bool) "returns #t iff OBJ is an output port")
-    (current-input-port (lambda () input-port) "the default input for read procedures")
-    (current-output-port (lambda () output-port) "the default output for write procedures")
-    (with-input-from-file (lambda (path thunk) obj))
-    (with-output-to-file (lambda (path thunk) obj))
-    (open-input-file (lambda (path) input-port))
-    (open-output-file (lambda (path) output-port))
-    (close-input-port (lambda (input-port)))
-    (close-output-port (lambda (output-port)))
-    (read (lambda (:optional input-port) obj) "read a datum")
-    (read-char (lambda (:optional input-port) ch) "read a single character")
-    (peek-char (lambda (:optional input-port) ch))
-    (eof-object? (lambda (obj) bool) "returns #t iff OBJ is the end-of-file object")
-    (char-ready? (lambda (:optional input-port) bool))
-    (write (lambda (object :optional output-port) undefined) "write a datum")
-    (display (lambda (object :optional output-port) undefined) "display")
-    (newline (lambda (:optional output-port) undefined) "send a linefeed")
-    (write-char (lambda (char :optional output-port) undefined) "write a single character")
-    (load (lambda (filename) undefined) "evaluate expressions from a file")
-    (eval (lambda (expr env)))
-  ))
+  nil)
+
+(defvar *scheme-r5rs-bindings*
+  '(define set! let let* letrec lambda if cond
+    case delay and or begin do quote quasiquote unquote unquote-splicing
+    define-syntax let-syntax letrec-syntax syntax-rules eqv? eq? equal? not
+    boolean? number? complex? real? rational? integer? exact? inexact? = < >
+    <= >= zero? positive? negative? odd? even? max min + * - / abs quotient
+    remainder modulo gcd lcm numerator denominator floor ceiling truncate
+    round rationalize exp log sin cos tan asin acos atan sqrt expt
+    make-rectangular make-polar real-part imag-part magnitude angle
+    number->string string->number pair? cons car cdr set-car! set-cdr! caar
+    cadr cdar cddr caaar caadr cadar caddr cdaar cdadr cddar cdddr caaaar
+    caaadr caadar caaddr cadaar cadadr caddar cadddr cdaaar cdaadr cdadar
+    cdaddr cddaar cddadr cdddar cddddr null? list? list length append reverse
+    list-tail list-ref memq memv member assq assv assoc symbol? symbol->string
+    string->symbol char? char=? char<? char>? char<=? char>=? char-ci=?
+    char-ci<? char-ci>? char-ci<=? char-ci>=? char-alphabetic? char-numeric?
+    char-whitespace? char-upper-case? char-lower-case? char->integer
+    integer->char char-upcase char-downcase string? make-string string
+    string-length string-ref string-set! string=? string-ci=? string<?
+    string>? string<=? string>=? string-ci<? string-ci>? string-ci<=?
+    string-ci>=? substring string-append string->list list->string string-copy
+    string-fill! vector? make-vector vector vector-length vector-ref
+    vector-set! vector->list list->vector vector-fill! procedure? apply map
+    for-each force call-with-current-continuation values call-with-values
+    dynamic-wind scheme-report-environment null-environment
+    call-with-input-file call-with-output-file input-port? output-port?
+    current-input-port current-output-port with-input-from-file
+    with-output-to-file open-input-file open-output-file close-input-port
+    close-output-port read read-char peek-char eof-object? char-ready? write
+    display newline write-char load eval))
+
+(defun scheme-r5rs-info ()
+  (unless *scheme-r5rs-info*
+    (setq *scheme-r5rs-info*
+          (append
+           '((exact->inexact (lambda (z) z))
+             (inexact->exact (lambda (z) z)))
+           (mapcar #'(lambda (x)
+                       (list x (scheme-env-lookup *scheme-r7rs-info* x)))
+                   *scheme-r5rs-bindings*))))
+  *scheme-r5rs-info*)
 
 (defvar *scheme-srfi-info*
   [
@@ -892,7 +1142,7 @@
 
    ;; SRFI 23
    ("Error reporting mechanism"
-    (error (lambda (reason-string arg \.\.\.))))
+    (error (lambda (reason-string arg \.\.\.) error)))
 
    ()
 
@@ -1367,698 +1617,122 @@
 
    ])
 
-(defvar *scheme-chicken-modules*
-  '((data-structures
-     (->string (lambda (obj) str))
-     (alist-ref (lambda (alist key :optional eq-fn default)))
-     (alist-update! (lambda (key value alist :optional eq-fn) undefined))
-     (always? (lambda (obj) bool))
-     (any? (lambda (obj) bool))
-     (atom? (lambda (obj) bool))
-     (binary-search (lambda (vec proc)))
-     (butlast (lambda (list) list) "drops the last element of list")
-     (chop (lambda (list k) list))
-     (complement (lambda (f) f2))
-     (compose (lambda (f1 f2 \.\.\.) f))
-     (compress (lambda (boolean-list list) list))
-     (conc (lambda (obj \.\.\.) str))
-     (conjoin (lambda (pred \.\.\.) pred))
-     (constantly (lambda (obj \.\.\.) f))
-     (disjoin (lambda (pred \.\.\.) pred))
-     (each (lambda (proc \.\.\.) proc))
-     (flatten (lambda (list1 \.\.\.) list))
-     (flip (lambda (proc) proc))
-     (identity (lambda (obj)))
-     (intersperse (lambda (list obj) list))
-     (join (lambda (list-of-lists :optional list) list))
-     (left-section (lambda (proc obj \.\.\.) proc))
-     (list->queue (lambda (list) queue))
-     (list-of? (lambda (pred) (lambda (list) bool)))
-     (make-queue (lambda () queue))
-     (merge (lambda (list1 list2 less-fn) list))
-     (merge! (lambda (list1 list2 less-fn) list))
-     (never? (lambda (obj) bool))
-     (none? (lambda (obj) bool))
-     (noop (lambda (obj \.\.\.) undefined))
-     (o (lambda (proc \.\.\.) (lambda (obj))))
-     (project (lambda (n) proc))
-     (queue->list (lambda (queue) list))
-     (queue-add! (lambda (queue obj) undefined))
-     (queue-empty? (lambda (queue) bool))
-     (queue-first (lambda (queue)))
-     (queue-last (lambda (queue)))
-     (queue-push-back! (lambda (queue obj) undefined))
-     (queue-push-back-list! (lambda (queue list) undefined))
-     (queue-remove! (lambda (queue) undefined))
-     (queue? (lambda (obj) bool))
-     (rassoc (lambda (key list :optional eq-fn)))
-     (right-section (lambda (proc obj \.\.\.) proc))
-     (shuffle (lambda (list) list))
-     (sort (lambda ((or list vector) less-fn) (or list vector)))
-     (sort! (lambda ((or list vector) less-fn) (or list vector)))
-     (sorted? (lambda ((or list vector) less-fn) bool))
-     (string-chomp (lambda (str :optional suffix-str) str))
-     (string-chop (lambda (str length) list))
-     (string-compare3 (lambda (str1 str2) n))
-     (string-compare3-ci (lambda (str1 str2) n))
-     (string-intersperse (lambda (list :optional seperator-string) str))
-     (string-split (lambda (str :optional delimiter-str keep-empty?) list))
-     (string-translate (lambda (str from-str :optional to-str) str))
-     (string-translate* (lambda (str list) str))
-     (substring-ci=? (lambda (str1 str2 :optional start1 start2 length) str))
-     (substring-index (lambda (which-str where-str :optional start) i))
-     (substring-index-ci (lambda (which-str where-str :optional start) i))
-     (substring=? (lambda (str1 str2 :optional start1 start2 length) bool))
-     (tail? (lambda (obj list) bool)))
-    (extras
-     (alist->hash-table (lambda (alist) hash-table))
-     (format (lambda (format-string arg \.\.\.)))
-     (fprintf (lambda (port format-string arg \.\.\.)))
-     (hash (lambda (obj :optional n) int))
-     (hash-by-identity (lambda (obj :optional n) int))
-     (hash-table->alist (lambda (hash-table) alist))
-     (hash-table-copy (lambda (hash-table) hash-table))
-     (hash-table-delete! (lambda (hash-table key) undefined))
-     (hash-table-equivalence-function (lambda (hash-table) pred))
-     (hash-table-exists? (lambda (hash-table key) bool))
-     (hash-table-fold (lambda (hash-table f init-value)))
-     (hash-table-hash-function (lambda (hash-table) f))
-     (hash-table-keys (lambda (hash-table) list))
-     (hash-table-merge! (lambda (hash-table1 hash-table2) undefined))
-     (hash-table-ref (lambda (hash-table key :optional thunk)))
-     (hash-table-ref/default (lambda (hash-table key default)))
-     (hash-table-remove! (lambda (hash-table proc) undefined))
-     (hash-table-set! (lambda (hash-table key value) undefined))
-     (hash-table-size (lambda (hash-table) n))
-     (hash-table-update! (lambda (hash-table key proc :optional thunk) undefined))
-     (hash-table-update!/default (lambda (hash-table key proc default) undefined))
-     (hash-table-values (lambda (hash-table) list))
-     (hash-table-walk (lambda (hash-table proc) undefined))
-     (hash-table? (lambda (obj) bool))
-     (make-hash-table (lambda (:optional eq-fn hash-fn size) hash-table))
-     (pp (lambda (obj :optional output-port) undefined))
-     (pretty-print (lambda (obj :optional output-port) undefined))
-     (pretty-print-width (lambda (:optional new-width) n))
-     (printf (lambda (format-string arg \.\.\.) undefined))
-     (random (lambda (n) n))
-     (randomize (lambda (:optional x1) undefined))
-     (read-file (lambda (:optional file-or-port reader-fn max-count) str))
-     (read-line (lambda (:optional port limit) str))
-     (read-lines (lambda (:optional port max) list))
-     (read-string (lambda (:optional n port) str))
-     (read-string! (lambda (n dest :optional port start) n))
-     (read-token (lambda (predicate :optional port) str))
-     (sprintf (lambda (format-string arg \.\.\.) str))
-     (string-hash (lambda (str1 :optional n) n))
-     (string-ci-hash (lambda (str :optional n) n))
-     (with-error-output-to-port (lambda (output-port thunk)))
-     (write-line (lambda (str :optional port) undefined))
-     (write-string (lambda (str :optional num port) undefined))
-     )
-    (files
-     (absolute-pathname? (lambda (pathname)))
-     (create-temporary-file (lambda (:optional ext-str)))
-     (decompose-pathname (lambda (pathname)))
-     (delete-file* (lambda (filename)))
-     (directory-null? (lambda (pathname) bool))
-     (file-copy (lambda (pathname1 pathname2 :optional bool size)))
-     (file-move (lambda (pathname1 pathname2 :optional bool size)))
-     (make-absolute-pathname (lambda (dir filename :optional ext-str)))
-     (make-pathname (lambda (dir filename :optional ext-str) pathname))
-     (normalize-pathname (lambda (pathname :optional platform) pathname))
-     (pathname-directory (lambda (pathname)))
-     (pathname-extension (lambda (pathname)))
-     (pathname-file (lambda (pathname)))
-     (pathname-replace-directory (lambda (pathname dir)))
-     (pathname-replace-extension (lambda (pathname ext-str)))
-     (pathname-replace-file (lambda (pathname filename)))
-     (pathname-strip-directory (lambda (pathname)))
-     (pathname-strip-extension (lambda (pathname)))
-     )
-    (foreign
-     (define-external (syntax (obj type body \.\.\.)))
-     (define-location (syntax (name type init)))
-     (let-location (syntax bindings body \.\.\.))
-     (foreign-code (syntax (str \.\.\.)))
-     (foreign-value (syntax (str type)))
-     (foreign-declare (syntax (str \.\.\.)))
-     (define-foreign-variable (syntax))
-     (foreign-lambda (syntax))
-     (foreign-lambda* (syntax))
-     (foreign-safe-lambda (syntax))
-     (foreign-safe-lambda* (syntax))
-     (location)
-     (foreign-code (syntax))
-     )
-    (irregex
-     (irregex (lambda (obj flags \.\.\.)))
-     (string->irregex (lambda (str flags \.\.\.)))
-     (sre->irregex (lambda (obj flags \.\.\.)))
-     (string->sre (lambda (str)))
-     (irregex? (lambda (obj) bool))
-     (irregex-match-data? (lambda (obj) bool))
-     (irregex-new-matches (lambda (irx)))
-     (irregex-reset-matches! (lambda (match-data) undefined))
-     (irregex-match-start (lambda (match-data) (or bool integer)))
-     (irregex-match-end (lambda (match-data) (or bool integer)))
-     (irregex-match-substring (lambda (match-data) (or bool string)))
-     (irregex-search (lambda (irx str :optional start end)))
-     (irregex-search/matches (lambda (irx str start end match-data)))
-     (irregex-match (lambda (irx str :optional start end)))
-     (irregex-match-string (lambda (match-data) str))
-     (irregex-fold (lambda (irx kons knil str :optional finish start end)))
-     (irregex-replace (lambda (irx str replacements \.\.\.) str))
-     (irregex-replace/all (lambda (irx str replacements \.\.\.) str))
-     (irregex-apply-match (lambda (match-data list) str))
-     (irregex-dfa (lambda (irx)))
-     (irregex-dfa/search (lambda (irx)))
-     (irregex-dfa/extract (lambda (irx)))
-     (irregex-nfa (lambda (irx)))
-     (irregex-flags (lambda (irx)))
-     (irregex-submatches (lambda (irx) n))
-     (irregex-lengths (lambda (irx) vector))
-     (irregex-names (lambda (irx))))
-    (lolevel
-     (address->pointer (lambda (n) ptr))
-     (align-to-word (lambda (ptr-or-int) ptr))
-     (allocate (lambda (size) block))
-     (block-ref (lambda (block index) int))
-     (block-set! (lambda (block index obj) undefined))
-     (byte-vector (lambda (n \.\.\.) byte-vector))
-     (byte-vector->list (lambda (byte-vector) list))
-     (byte-vector->string (lambda (byte-vector) string))
-     (byte-vector-fill! (lambda (byte-vector n) undefined))
-     (byte-vector-length (lambda (byte-vector) n))
-     (byte-vector-ref (lambda (byte-vector i) int))
-     (byte-vector-set! (lambda (byte-vector i n) undefined))
-     (byte-vector? (lambda (obj) bool))
-     (extend-procedure (lambda (proc x1) proc))
-     (extended-procedure? (lambda (proc) bool))
-     (free (lambda (pointer) undefined))
-     (global-bound? (lambda (sym) bool))
-     (global-make-unbound! (lambda (sym) undefined))
-     (global-ref (lambda (sym)))
-     (global-set! (lambda (sym val) undefined))
-     (list->byte-vector (lambda (list) byte-vector))
-     (locative->object (lambda (locative) obj))
-     (locative-ref (lambda (locative)))
-     (locative-set! (lambda (locative val) undefined))
-     (locative? (lambda (obj) bool))
-     (make-byte-vector (lambda (size :optional init-n) byte-vector))
-     (make-locative (lambda (obj :optional index) locative))
-     (make-record-instance (lambda (sym arg \.\.\.)))
-     (make-static-byte-vector (lambda (size :optional init-n)))
-     (make-weak-locative (lambda (obj :optional index) locative))
-     (move-memory! (lambda (from to :optional bytes from-offset to-offset) undefined))
-     (mutate-procedure (lambda (proc proc) proc))
-     (null-pointer (lambda () pointer))
-     (null-pointer? (lambda (pointer) bool))
-     (number-of-bytes (lambda (block) int))
-     (number-of-slots (lambda (block) int))
-     (object->pointer (lambda (obj) ptr))
-     (object-become! (lambda (alist) undefined))
-     (object-copy (lambda (obj)))
-     (object-evict (lambda (obj :optional allocator-proc)))
-     (object-evict-to-location (lambda (obj ptr :optional limit)))
-     (object-evicted? (lambda (obj) bool))
-     (object-release (lambda (obj :optional releaser-proc)))
-     (object-size (lambda (obj) int))
-     (object-unevict (lambda (obj :optional full)))
-     (pointer->address (lambda (ptr) n))
-     (pointer->object (lambda (ptr)))
-     (pointer-f32-ref (lambda (ptr) real))
-     (pointer-f32-set! (lambda (ptr x1) undefined))
-     (pointer-f64-ref (lambda (ptr) real))
-     (pointer-f64-set! (lambda (ptr x1) undefined))
-     (pointer-offset (lambda (ptr n) n))
-     (pointer-s16-ref (lambda (ptr) int))
-     (pointer-s16-set! (lambda (ptr n) undefined))
-     (pointer-s32-ref (lambda (ptr) int))
-     (pointer-s32-set! (lambda (ptr n) undefined))
-     (pointer-s8-ref (lambda (ptr) int))
-     (pointer-s8-set! (lambda (ptr n) undefined))
-     (pointer-tag (lambda (ptr) tag))
-     (pointer-u16-ref (lambda (ptr) int))
-     (pointer-u16-set! (lambda (ptr n) undefined))
-     (pointer-u32-ref (lambda (ptr) int))
-     (pointer-u32-set! (lambda (ptr n) undefined))
-     (pointer-u8-ref (lambda (ptr) int))
-     (pointer-u8-set! (lambda (ptr n) undefined))
-     (pointer=? (lambda (ptr1 ptr2) bool))
-     (pointer? (lambda (obj) bool))
-     (procedure-data (lambda (proc)))
-     (record->vector (lambda (block) vector))
-     (record-instance? (lambda (obj) bool))
-     (set-invalid-procedure-call-handler! (lambda (proc) undefined))
-     (set-procedure-data! (lambda (proc obj) undefined))
-     (static-byte-vector->pointer (lambda (byte-vector) pointer))
-     (string->byte-vector (lambda (str) byte-vector))
-     (tag-pointer (lambda (ptr tag)))
-     (tagged-pointer? (lambda (obj tag) bool))
-     (unbound-variable-value (lambda (:optional value)))
-     )
-    (ports
-     (call-with-input-string (lambda (string proc)))
-     (call-with-output-string (lambda (proc) str))
-     (make-input-port (lambda (read-proc ready?-pred close-proc :optional peek-proc) input-port))
-     (make-output-port (lambda (write-proc close-proc :optional flush-proc) output-port))
-     (port-for-each (lambda (read-fn thunk) undefined))
-     (port-map (lambda (read-fn thunk)))
-     (port-fold (lambda (proc init port)))
-     (make-broadcast-port (lambda (output-port \.\.\.) output-port))
-     (make-concatenated-port (lambda (input-port \.\.\.) input-port))
-     (with-input-from-port (lambda (input-port thunk)))
-     (with-input-from-string (lambda (str thunk)))
-     (with-output-to-port (lambda (output-port thunk)))
-     (with-output-to-string (lambda (thunk) str))
-     (with-error-output-to-port (lambda (output-port thunk))))
-    (posix
-     (_exit (lambda (:optional n) undefined))
-     (call-with-input-pipe (lambda (cmdline-string proc :optional mode)))
-     (call-with-output-pipe (lambda (cmdline-string proc :optional mode)))
-     (change-directory (lambda (dir)))
-     (change-file-mode (lambda (filename mode)))
-     (change-file-owner (lambda (filename user-n group-n)))
-     (close-input-pipe (lambda (input-port)))
-     (close-output-pipe (lambda (output-port)))
-     (create-directory (lambda (filename)))
-     (create-fifo (lambda (filename :optional mode)))
-     (create-pipe (lambda ()))
-     (create-session (lambda ()))
-     (create-symbolic-link (lambda (old-filename new-filename)))
-     (current-directory (lambda (:optional new-dir)))
-     (current-effective-group-id (lambda () int))
-     (current-effective-user-id (lambda () int))
-     (current-environment (lambda ()))
-     (current-group-id (lambda ()))
-     (current-process-id (lambda ()))
-     (current-user-id (lambda ()))
-     (delete-directory (lambda (dir)))
-     (directory (lambda (:optional dir show-dotfiles?) list))
-     (directory? (lambda (filename) bool))
-     (duplicate-fileno (lambda (old-n :optional new-n)))
-     (errno/acces integer)
-     (errno/again integer)
-     (errno/badf integer)
-     (errno/busy integer)
-     (errno/child integer)
-     (errno/exist integer)
-     (errno/fault integer)
-     (errno/intr integer)
-     (errno/inval integer)
-     (errno/io integer)
-     (errno/isdir integer)
-     (errno/mfile integer)
-     (errno/noent integer)
-     (errno/noexec integer)
-     (errno/nomem integer)
-     (errno/nospc integer)
-     (errno/notdir integer)
-     (errno/perm integer)
-     (errno/pipe integer)
-     (errno/rofs integer)
-     (errno/spipe integer)
-     (errno/srch integer)
-     (errno/wouldblock integer)
-     (fifo? (lambda (filename) bool))
-     (file-access-time (lambda (filename) real))
-     (file-change-time (lambda (filename) real))
-     (file-close (lambda (fileno)))
-     (file-execute-access? (lambda (filename) bool))
-     (file-link (lambda (old-filename new-filename)))
-     (file-lock (lambda (port :optional start len)))
-     (file-lock/blocking (lambda (port :optional start len)))
-     (file-mkstemp (lambda (template-filename)))
-     (file-modification-time (lambda (filename) real))
-     (file-open (lambda (filename (flags open-mode open/binary open/excl open/fsync open/noctty open/nonblock open/rdonly open/rdwr open/read open/sync open/text) :optional mode) fileno))
-     (file-owner (lambda (filename)))
-     (file-permissions (lambda (filename) int))
-     (file-position (lambda (port-or-fileno) int))
-     (file-read (lambda (fileno size :optional buffer-string)))
-     (file-read-access? (lambda (filename) bool))
-     (file-select (lambda (read-fd-list write-fd-list :optional timeout)))
-     (file-size (lambda (filename) int))
-     (file-stat (lambda (filename :optional follow-link?)))
-     (file-test-lock (lambda (port :optional start len)))
-     (file-truncate (lambda (filename-or-fileno offset)))
-     (file-unlock (lambda (lock)))
-     (file-write (lambda (fileno buffer-string :optional size)))
-     (file-write-access? (lambda (filename)))
-     (fileno/stderr integer)
-     (fileno/stdin integer)
-     (fileno/stdout integer)
-     (find-files (lambda (dir pred :optional action-proc identity limit)))
-     (get-groups (lambda ()))
-     (get-host-name (lambda ()))
-     (glob (lambda (pattern1 \.\.\.)))
-     (group-information (lambda (group-name-or-n)))
-     (initialize-groups (lambda (user-name base-group-n)))
-     (local-time->seconds (lambda (vector)))
-     (local-timezone-abbreviation (lambda ()))
-     (map-file-to-memory (lambda (address len protection flag fileno :optional offset)))
-     (memory-mapped-file-pointer (lambda (mmap)))
-     (memory-mapped-file? (lambda (obj)))
-     (open-input-file* (lambda (fileno :optional (flags open-mode open/binary open/excl open/fsync open/noctty open/nonblock open/rdonly open/rdwr open/read open/sync open/text))))
-     (open-input-pipe (lambda (cmdline-string :optional mode)))
-     (open-output-file* (lambda (fileno :optional (flags open-mode open/append open/binary open/creat open/excl open/fsync open/noctty open/nonblock open/rdwr open/sync open/text open/trunc open/write open/wronly))))
-     (open-output-pipe (lambda (cmdline-string :optional mode)))
-     (open/append integer)
-     (open/binary integer)
-     (open/creat integer)
-     (open/excl integer)
-     (open/fsync integer)
-     (open/noctty integer)
-     (open/nonblock integer)
-     (open/rdonly integer)
-     (open/rdwr integer)
-     (open/read integer)
-     (open/sync integer)
-     (open/text integer)
-     (open/trunc integer)
-     (open/write integer)
-     (open/wronly integer)
-     (parent-process-id (lambda ()))
-     (perm/irgrp integer)
-     (perm/iroth integer)
-     (perm/irusr integer)
-     (perm/irwxg integer)
-     (perm/irwxo integer)
-     (perm/irwxu integer)
-     (perm/isgid integer)
-     (perm/isuid integer)
-     (perm/isvtx integer)
-     (perm/iwgrp integer)
-     (perm/iwoth integer)
-     (perm/iwusr integer)
-     (perm/ixgrp integer)
-     (perm/ixoth integer)
-     (perm/ixusr integer)
-     (pipe/buf integer)
-     (port->fileno (lambda (port)))
-     (process (lambda (cmdline-string :optional arg-list env-list)))
-     (process-execute (lambda (filename :optional arg-list env-list)))
-     (process-fork (lambda (:optional thunk)))
-     (process-group-id (lambda ()))
-     (process-run (lambda (filename :optional list)))
-     (process-signal (lambda (pid :optional signal)))
-     (process-wait (lambda (:optional pid nohang?)))
-     (read-symbolic-link (lambda (filename) filename))
-     (regular-file? (lambda (filename)))
-     (seconds->local-time (lambda (seconds)))
-     (seconds->string (lambda (seconds)))
-     (seconds->utc-time (lambda (seconds)))
-     (set-alarm! (lambda (seconds)))
-     (set-buffering-mode! (lambda (port mode :optional buf-size)))
-     (set-file-position! (lambda (port-or-fileno pos :optional whence)))
-     (set-group-id! (lambda (n)))
-     (set-groups! (lambda (group-n-list)))
-     (set-process-group-id! (lambda (process-n n)))
-     (set-root-directory! (lambda (dir)) "chroot")
-     (set-signal-handler! (lambda (sig-n proc)))
-     (set-signal-mask! (lambda (sig-n-list)))
-     (set-user-id! (lambda (n)))
-     (setenv (lambda (name value-string)))
-     (signal/abrt integer)
-     (signal/alrm integer)
-     (signal/chld integer)
-     (signal/cont integer)
-     (signal/fpe integer)
-     (signal/hup integer)
-     (signal/ill integer)
-     (signal/int integer)
-     (signal/io integer)
-     (signal/kill integer)
-     (signal/pipe integer)
-     (signal/prof integer)
-     (signal/quit integer)
-     (signal/segv integer)
-     (signal/stop integer)
-     (signal/term integer)
-     (signal/trap integer)
-     (signal/tstp integer)
-     (signal/urg integer)
-     (signal/usr1 integer)
-     (signal/usr2 integer)
-     (signal/vtalrm integer)
-     (signal/winch integer)
-     (signal/xcpu integer)
-     (signal/xfsz integer)
-     (sleep (lambda (seconds)))
-     (symbolic-link? (lambda (filename)))
-     (system-information (lambda ()))
-     (terminal-name (lambda (port)))
-     (terminal-port? (lambda (port)))
-     (time->string (lambda (vector)))
-     (unmap-file-from-memory (lambda (mmap :optional len)))
-     (unsetenv (lambda (name) undefined))
-     (user-information (lambda ((or integer (string scheme-complete-user-name))) list))
-     (utc-time->seconds (lambda (vector)))
-     (with-input-from-pipe (lambda (cmdline-string thunk :optional mode)))
-     (with-output-to-pipe (lambda (cmdline-string thunk :optional mode)))
-     )
-    (regex
-     (glob->regexp (lambda (pattern)))
-     (glob? (lambda (obj)))
-     (grep (lambda (pattern list) list))
-     (regexp (lambda (pattern ignore-case? ignore-space? utf-8?)))
-     (regexp-escape (lambda (str) str))
-     (regexp? (lambda (obj) bool))
-     (string-match (lambda (pattern str :optional start)))
-     (string-match-positions (lambda (pattern str :optional start)))
-     (string-search (lambda (pattern str :optional start)))
-     (string-search-positions (lambda (pattern str :optional start)))
-     (string-split-fields (lambda (pattern str :optional mode start)))
-     (string-substitute (lambda (pattern subst str :optional mode)))
-     (string-substitute* (lambda (str subst-list :optional mode)))
-     )
-    (tcp
-     (tcp-abandon-port (lambda (port)))
-     (tcp-accept (lambda (listener)))
-     (tcp-accept-ready? (lambda (listener)))
-     (tcp-accept-timeout (lambda (:optional number)))
-     (tcp-addresses (lambda (port)))
-     (tcp-buffer-size (lambda (:optional new-size)))
-     (tcp-close (lambda (listener)))
-     (tcp-connect (lambda ((string scheme-complete-host-name) :optional (string scheme-complete-port-name))))
-     (tcp-connect-timeout (lambda (:optional number)))
-     (tcp-listen (lambda (tcp-port-n :optional backlog-n host-string)))
-     (tcp-listener-fileno (lambda (listener)))
-     (tcp-listener-port (lambda (listener)))
-     (tcp-listener? (lambda (obj)))
-     (tcp-port-numbers (lambda (port)))
-     (tcp-read-timeout (lambda (:optional number)))
-     (tcp-write-timeout (lambda (:optional number)))
-     )
-    (utils
-     (for-each-argv-line (lambda (proc) undefined))
-     (for-each-line (lambda (proc :optional input-port) undefined))
-     (read-all (lambda (:optional file-or-port)))
-     (shift! (lambda (list :optional default)))
-     (system* (lambda (format-string arg1 \.\.\.)))
-     (compile-file (lambda (filename)))
-     (qs (lambda (str :optional platform) str)
-         "quote string for shell")
-     )
-    ))
-
 ;; another big table - consider moving to a separate file
 (defvar *scheme-implementation-exports*
-  '((chicken
-     (abort (lambda (obj) undefined))
-     (add1 (lambda (z) z))
-     (andmap (lambda (pred list) bool))
-     (argc+argv (lambda () (values n ptr)))
-     (argv (lambda () list))
-     (bit-set? (lambda (index n) bool))
-     (bitwise-and (lambda (n \.\.\.) n))
-     (bitwise-ior (lambda (n \.\.\.) n))
-     (bitwise-not (lambda (n \.\.\.) n))
-     (bitwise-xor (lambda (n \.\.\.) n))
-     (blob->string (lambda (blob) string))
-     (blob-size (lambda (blob) n))
-     (blob? (lambda (obj) bool))
-     (breakpoint (lambda (:optional name)))
-     (build-platform (lambda () symbol))
-     (c-runtime (lambda () symbol))
-     (call/cc (lambda (proc)))
-     (case-sensitive (lambda (:optional on?)))
-     (chicken-home (lambda () string))
-     (chicken-version (lambda () string))
-     (command-line-arguments (lambda () list))
-     (cond-expand (syntax))
-     (condition-predicate (lambda (kind) pred))
-     (condition-property-accessor (lambda (kind prop :optional err?) proc))
-     (condition? (lambda (obj) bool))
-     (continuation-capture (lambda (proc)))
-     (continuation-graft (lambda (continuation thunk)))
-     (continuation-return (lambda (continuation vals\.\.\.)))
-     (continuation? (lambda (obj) bool))
-     (copy-read-table (lambda (read-table) read-table))
-     (cpu-time (lambda () (values n n)))
-     (current-error-port (lambda () output-port))
-     (current-exception-handler (lambda () proc))
-     (current-gc-milliseconds (lambda () n))
-     (current-milliseconds (lambda () n))
-     (current-read-table (lambda () read-table))
-     (current-seconds (lambda () x1))
-     (cut (syntax))
-     (cute (lambda (args \.\.\.) proc))
-     (declare (syntax))
-     (define-record (syntax))
-     (define-record-printer (syntax))
-     (define-reader-ctor (lambda (sym proc) undefined))
-     (delete-file (lambda (filename) undefined))
-     (disable-interrupts (lambda () undefined))
-     (dynamic-load-libraries (lambda () list))
-     (dynamic-wind (lambda (before-thunk thunk after-thunk)))
-     (enable-interrupts (lambda () undefined))
-     (enable-warnings (lambda () undefined))
-     (er-macro-transformer (syntax))
-     (errno (lambda () n))
-     (error (lambda (error-string args \.\.\.) undefined))
-     (eval-handler (lambda () proc))
-     (exit (lambda (:optional n) undefined))
-     (exit-handler (lambda () proc))
-     (extension-info (lambda (proc)))
-     (extension-information (lambda (proc)))
-     (feature? (lambda (sym) bool))
-     (features (lambda () list))
-     (file-exists? (lambda (filename) bool))
-     (finite? (lambda (z) bool))
-     (fixnum? (lambda (obj) bool))
-     (flonum? (lambda (obj) bool))
-     (flush-output (lambda (:optional port) undefined))
-     (force (lambda (promise)))
-     (force-finalizers (lambda (f args \.\.\.)))
-     (fp* (lambda (x1 x2) x3))
-     (fp+ (lambda (x1 x2) x3))
-     (fp- (lambda (x1 x2) x3))
-     (fp/ (lambda (x1 x2) x3))
-     (fp< (lambda (x1 x2) x3))
-     (fp<= (lambda (x1 x2) x3))
-     (fp= (lambda (x1 x2) x3))
-     (fp> (lambda (x1 x2) x3))
-     (fp>= (lambda (x1 x2) x3))
-     (fpmax (lambda (x1 x2) x3))
-     (fpmin (lambda (x1 x2) x3))
-     (fpneg (lambda (x1 x2) x3))
-     (fx* (lambda (n1 n2) n))
-     (fx+ (lambda (n1 n2) n))
-     (fx- (lambda (n1 n2) n))
-     (fx/ (lambda (n1 n2) n))
-     (fx< (lambda (n1 n2) n))
-     (fx<= (lambda (n1 n2) n))
-     (fx= (lambda (n1 n2) n))
-     (fx> (lambda (n1 n2) n))
-     (fx>= (lambda (n1 n2) n))
-     (fxand (lambda (n1 n2) n))
-     (fxior (lambda (n1 n2) n))
-     (fxmax (lambda (n1 n2) n))
-     (fxmin (lambda (n1 n2) n))
-     (fxmod (lambda (n1 n2) n))
-     (fxneg (lambda (n1 n2) n))
-     (fxnot (lambda (n1 n2) n))
-     (fxshl (lambda (n1 n2) n))
-     (fxshr (lambda (n1 n2) n))
-     (fxxor (lambda (n1 n2) n))
-     (gc (lambda () n))
-     (gensym (lambda (:optional name) sym))
-     (get-call-chain (lambda (:optional n) list))
-     (get-keyword (lambda (sym list :optional default)))
-     (get-line-number (lambda (sexp) n))
-     (get-output-string (lambda (string-output-port) string))
-     (getenv (lambda (name) string))
-     (get-environment-variable (lambda (name) string))
-     (getter-with-setter (lambda (get-proc set-proc) proc))
-     (import (special symbol scheme-chicken-available-modules)
-             "import extensions into the current module")
-     (implicit-exit-handler (lambda (:optional proc) proc))
-     (invalid-procedure-call-handler (lambda (:optional proc) proc))
-     (keyword->string (lambda (sym) string))
-     (keyword-style (lambda (:optional sym) sym))
-     (keyword? (lambda (obj) bool))
-     (load-library (lambda (sym) undefined))
-     (load-noisily (lambda (string) undefined))
-     (load-relative (lambda (string) undefined))
-     (load-verbose (lambda (:optional bool) bool))
-     (machine-byte-order (lambda () sym))
-     (machine-type (lambda () sym))
-     (macro? (lambda (obj) bool))
-     (macroexpand (lambda (sexp) sexp))
-     (macroexpand-1 (lambda (sexp) sexp))
-     (make-blob (lambda (size) blob))
-     (make-composite-condition (lambda (condition \.\.\.) condition))
-     (make-parameter (lambda (val) proc))
-     (make-property-condition (lambda (kind \.\.\.) condition))
-     (match-error-control (lambda (:optional proc) proc))
-     (match-error-procedure (lambda (:optional proc) proc))
-     (memory-statistics (lambda () vector))
-     (on-exit (lambda (thunk) undefined))
-     (open-input-string (lambda (string) string-input-port))
-     (open-output-string (lambda () string-output-port))
-     (ormap (lambda (pred list \.\.\.) bool))
-     (port-name (lambda (:optional port) name))
-     (port-position (lambda (:optional port) n))
-     (port? (lambda (obj) bool))
-     (print (lambda (obj \.\.\.) undefined))
-     (print* (lambda (obj \.\.\.) undefined))
-     (print-backtrace (lambda (:optional n) undefined))
-     (print-call-chain (lambda (:optional n) undefined))
-     (print-error-message (lambda (err args \.\.\.) undefined))
-     (procedure-information (lambda (proc)))
-     (program-name (lambda (:optional name) name))
-     (provide (lambda (name)))
-     (provided? (lambda (name) bool))
-     (rational? (lambda (obj) bool))
-     (read-byte (lambda (:optional input-port) n))
-     (register-feature! (lambda (name) undefined))
-     (rename-file (lambda (old-name new-name) undefined))
-     (repl (lambda () undefined))
-     (repository-path (lambda (:optional dirname) dirname))
-     (require (lambda (sym \.\.\.) undefined))
-     (require-extension
-      (special symbol scheme-chicken-available-modules)
-      "import extensions into top-level namespace")
-     (require-library
-      (special symbol scheme-chicken-available-modules)
-      "load (but don't import) extensions")
-     (reset (lambda () undefined))
-     (reset-handler (lambda (:optional proc) proc))
-     (return-to-host (lambda () undefined))
-     (reverse-list->string (lambda (list) string))
-     (set-dynamic-load-mode! (lambda (obj) undefined))
-     (set-extension-specifier! (lambda (name proc) undefined))
-     (set-finalizer! (lambda (obj proc) undefined))
-     (set-gc-report! (lambda (bool) undefined))
-     (set-parameterized-read-syntax! (lambda (ch proc) undefined))
-     (set-port-name! (lambda (port name) undefined))
-     (set-read-syntax! (lambda (ch proc) undefined))
-     (set-sharp-read-syntax! (lambda (ch proc) undefined))
-     (setter (lambda (proc) proc))
-     (signal (lambda (n) undefined))
-     (signum (lambda (x1) x2))
-     (singlestep (lambda (thunk)))
-     (software-type (lambda () sym))
-     (software-version (lambda () sym))
-     (string->blob (lambda (string) blob))
-     (string->keyword (lambda (string) sym))
-     (string->uninterned-symbol (lambda (string) sym))
-     (string-copy (lambda (string) string))
-     (sub1 (lambda (z1) z2))
-     (syntax-error (lambda (args \.\.\.) undefined))
-     (system (lambda (str) n))
-     (test-feature? (lambda (obj) bool))
-     (undefine-macro! (lambda (sym) undefined))
-     (unregister-feature! (lambda (sym) undefined))
-     (use (special symbol scheme-chicken-available-modules)
-          "import extensions into top-level namespace")
-     (vector-copy! (lambda (from-vector to-vector :optional start) undefined))
-     (vector-resize (lambda (vec n :optional init)))
-     (void (lambda () undefined))
-     (warning (lambda (msg-str args \.\.\.) undefined))
+  `((chibi
+     (current-exception-handler (lambda (:optional thunk) thunk))
+     (command-line (lambda () list))
+     (pair-source (lambda (pair)))
+     (pair-source-set! (lambda (pair obj)))
+     (cons-source (lambda (kar kdr source) pair))
+     (bytevector-u8-ref (lambda (bytevector i) n))
+     (bytevector-u8-set! (lambda (bytevector i n)))
+     (bytevector-length (lambda (bytevector) n))
+     (string-cursor-ref (lambda (string i) char))
+     (string-cursor-set! (lambda (string i char)))
+     (string-cursor-next (lambda (string i) i))
+     (string-cursor-prev (lambda (string i) i))
+     (string-size (lambda (string) i))
+     (make-exception (lambda (symbol string list proc source) exception))
+     (exception-kind (lambda (exception) symbol))
+     (exception-irritants (lambda (exception) list))
+     (is-a? (lambda (obj type) boolean))
+     (fixnum? (lambda (obj) boolean))
+     (flonum? (lambda (obj) boolean))
+     (bignum? (lambda (obj) boolean))
+     (ratio? (lambda (obj) boolean))
+     (ratio-numerator (lambda (n) n))
+     (ratio-denominator (lambda (n) n))
+     (complex? (lambda (obj) boolean))
+     (complex-real (lambda (z) x))
+     (complex-imag (lambda (z) x))
+     (bytevector? (lambda (obj) boolean))
+     (fileno? (lambda (obj) boolean))
+     (exception? (lambda (obj) boolean))
+     (closure? (lambda (obj) boolean))
+     (opcode? (lambda (obj) boolean))
+     (binary-port? (lambda (obj) boolean))
+     (textual-port? (lambda (obj) boolean))
+     (port-open? (lambda (obj) boolean))
+     (apply1 (lambda (proc list)))
+     (raise (lambda (obj)))
+     (flush-output (lambda (:optional port)))
+     (equal?/bounded (lambda (a b bound) boolean))
+     (identifier? (lambda (obj) boolean))
+     (identifier=? (lambda (obj env obj env) boolean))
+     (identifier->symbol (lambda (obj) symbol))
+     (length* (lambda (obj) n))
+     (append2 (lambda (ls ls) ls))
+     (open-binary-input-file (lambda (filename) port))
+     (open-binary-output-file (lambda (filename) port))
+     (make-environment (lambda () env))
+     (primitive-environment (lambda (i) env))
+     (env-parent (lambda (env) env))
+     (compile (lambda (obj :optional env)))
+     (generate (lambda (obj :optional env)))
+     (%load (lambda (filename :optional env)))
+     (%import (lambda (env env list boolean)))
+     (print-exception (lambda (exception :optional port)))
+     (print-stack-trace (lambda (:optional port)))
+     (warn-undefs (lambda (from to res)))
+     (make-bytevector (lambda (i) bytevector))
+     (string-concatenate (lambda (list :optional string) string))
+     (make-syntactic-closure (lambda (env list obj) syntactic-closure))
+     (strip-syntactic-closures (lambda (obj)))
+     (open-output-string (lambda () output-port))
+     (open-input-string (lambda (string) input-port))
+     (get-output-string (lambda (output-port) string))
+     (open-input-file-descriptor (lambda (i :optional boolean) input-port))
+     (open-output-file-descriptor (lambda (i :optional boolean) output-port))
+     (set-port-line! (lambda (port i)))
+     (register-optimization! (lambda (proc i)))
+     (exact-sqrt (lambda (i) i))
+     (string-index->offset (lambda (string i) i))
+     (string-offset->index (lambda (string i) i))
+     (substring-cursor (lambda (string start :optional end) string))
+     (subbytes (lambda (bytevector start :optional end) bytevector))
+     (port-fold-case? (lambda (port) boolean))
+     (set-port-fold-case! (lambda (port boolean)))
+     (lookup-type (lambda (string obj) type))
+     (register-simple-type (lambda (string type list) type))
+     (make-type-predicate (lambda (string i) proc))
+     (make-constructor (lambda (string i i) proc))
+     (make-getter (lambda (string i i) proc))
+     (make-setter (lambda (string i i) proc))
+     (type-slot-offset (lambda (type symbol) proc))
+     (slot-ref (lambda (obj obj obj i)))
+     (slot-set! (lambda (obj obj obj i obj)))
+     (port-fileno (lambda (port) fileno))
+     (current-environment (lambda () env))
+     (set-current-environment! (lambda (env)))
+     (%meta-env (lambda () env))
+     (env-exports (lambda (env) list))
+     (current-module-path (lambda (:optional list) list))
+     (find-module-file (lambda (filename) filename))
+     (load-module-file (lambda (filename env)))
+     (add-module-directory (lambda (filename boolean)))
+     (%dk (lambda (:optional obj)))
+     (yield! (lambda ()))
+     (thread-parameters (lambda ()))
+     (thread-parameters-set! (lambda (obj)))
+     (any (lambda ((lambda (obj1 . obj2) a) list \.\.\.) a))
+     (every (lambda ((lambda (obj1 . obj2) a) list \.\.\.) a))
+     (error (lambda (reason-string arg \.\.\.) error))
+     (sc-macro-transformer (lambda (proc) proc))
+     (rsc-macro-transformer (lambda (proc) proc))
+     (er-macro-transformer (lambda (proc) proc))
+     (delay-force (syntax expr))
+     (define-auxiliary-syntax (syntax symbol))
+     (call-with-input-string (lambda (str proc)))
+     (call-with-output-string (lambda (proc) str))
+     (syntax-error (syntax string))
+     (letrec* (syntax (vars body \.\.\.)) "bind new local variables recursively in order")
+     (let-optionals* (syntax (list vars body \.\.\.)) "bind variables optionally")
+     (raise-continuable (lambda (exception)))
      (with-exception-handler (lambda (handler thunk)))
-     (write-byte (lambda (n :optional output-port) undefined))
-     )
+     (protect (syntax (clauses \.\.\.)))
+     (with-exception-protect (lambda (thunk thunk)))
+     (exception-protect (syntax expr final)))
     (gauche
      (E2BIG integer)
      (EACCES integer)
@@ -2268,7 +1942,7 @@
      (call-with-input-string (lambda (str proc)))
      (call-with-output-string (lambda (proc) str))
      (call-with-string-io (lambda (str proc) str))
-     (case-lambda (syntax))
+     (case-lambda (syntax (clauses \.\.\.) procedure))
      (change-class (lambda (obj new-class)))
      (change-object-class (lambda (obj orig-class new-class)))
      (char->ucs (lambda (ch) int))
@@ -2645,16 +2319,16 @@
      (string-incomplete? (lambda (str) bool))
      (string-interpolate (lambda (str) list))
      (string-join (lambda (list :optional delim-str (set grammar infix strict-infix prefix suffix))))
-;; deprecated
-;;      (string-pointer-byte-index (lambda ()))
-;;      (string-pointer-copy (lambda ()))
-;;      (string-pointer-index (lambda ()))
-;;      (string-pointer-next! (lambda ()))
-;;      (string-pointer-prev! (lambda ()))
-;;      (string-pointer-ref (lambda ()))
-;;      (string-pointer-set! (lambda ()))
-;;      (string-pointer-substring (lambda ()))
-;;      (string-pointer? (lambda ()))
+     ;; deprecated
+     ;;      (string-pointer-byte-index (lambda ()))
+     ;;      (string-pointer-copy (lambda ()))
+     ;;      (string-pointer-index (lambda ()))
+     ;;      (string-pointer-next! (lambda ()))
+     ;;      (string-pointer-prev! (lambda ()))
+     ;;      (string-pointer-ref (lambda ()))
+     ;;      (string-pointer-set! (lambda ()))
+     ;;      (string-pointer-substring (lambda ()))
+     ;;      (string-pointer? (lambda ()))
      (string-scan (lambda (string item :optional (set return index before after before* after* both))))
      (string-size (lambda (str) n))
      (string-split (lambda (str splitter) list))
@@ -2756,27 +2430,27 @@
      (sys-sleep (lambda (x1)))
      (sys-srandom (lambda (n)))
      (sys-stat (lambda (filename)))
-;; deprecated
-;;      (sys-stat->atime (lambda ()))
-;;      (sys-stat->ctime (lambda ()))
-;;      (sys-stat->dev (lambda ()))
-;;      (sys-stat->file-type (lambda ()))
-;;      (sys-stat->gid (lambda ()))
-;;      (sys-stat->ino (lambda ()))
-;;      (sys-stat->mode (lambda ()))
-;;      (sys-stat->mtime (lambda ()))
-;;      (sys-stat->nlink (lambda ()))
-;;      (sys-stat->rdev (lambda ()))
-;;      (sys-stat->size (lambda ()))
-;;      (sys-stat->type (lambda ()))
-;;      (sys-stat->uid (lambda ()))
+     ;; deprecated
+     ;;      (sys-stat->atime (lambda ()))
+     ;;      (sys-stat->ctime (lambda ()))
+     ;;      (sys-stat->dev (lambda ()))
+     ;;      (sys-stat->file-type (lambda ()))
+     ;;      (sys-stat->gid (lambda ()))
+     ;;      (sys-stat->ino (lambda ()))
+     ;;      (sys-stat->mode (lambda ()))
+     ;;      (sys-stat->mtime (lambda ()))
+     ;;      (sys-stat->nlink (lambda ()))
+     ;;      (sys-stat->rdev (lambda ()))
+     ;;      (sys-stat->size (lambda ()))
+     ;;      (sys-stat->type (lambda ()))
+     ;;      (sys-stat->uid (lambda ()))
      (sys-strerror (lambda (errno) string))
      (sys-strftime (lambda (format-string time)))
      (sys-symlink (lambda (old-filename new-filename)))
      (sys-system (lambda (command) n))
      (sys-time (lambda () n))
      (sys-times (lambda () list))
-;;      (sys-tm->alist (lambda ()))
+     ;;      (sys-tm->alist (lambda ()))
      (sys-tmpnam (lambda () string))
      (sys-truncate (lambda (filename n)))
      (sys-ttyname (lambda (port-or-fileno) string))
@@ -2849,104 +2523,281 @@
      )))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; special lookups (XXXX add more impls, try to abstract better)
+;; special lookups (TODO add more impls, try to abstract better)
 
-(defvar *scheme-chicken-base-repo*
-  (or (let ((repo (getenv "CHICKEN_REPOSITORY")))
-        (and repo (file-exists-p repo) repo))
-      (let ((dir
-             (car (remove-if-not #'file-directory-p
-                                 '("/usr/lib/chicken"
-                                   "/usr/local/lib/chicken"
-                                   "/opt/lib/chicken"
-                                   "/opt/local/lib/chicken"
-                                   )))))
-        (and dir
-             (car (reverse (sort (directory-files dir t "^[0-9]+$")
-                                 #'string-lessp)))))
-      (and (fboundp 'shell-command-to-string)
-           (let* ((res (shell-command-to-string
-                        "csi -e '(print (repository-path))'"))
-                  (res (substring res 0 (- (length res) 1))))
-             (and res (file-directory-p res) res)))
-      "/usr/local/lib/chicken/4"))
+(defun scheme-srfi-exports (i)
+  (and (integerp i)
+       (>= i 0)
+       (< i (length *scheme-srfi-info*))
+       (let ((info (cdr (aref *scheme-srfi-info* i))))
+         (if (and (consp info) (null (cdr info)) (symbolp (car info)))
+             (scheme-module-exports (car info))
+           info))))
 
-(defvar *scheme-chicken-repo-dirs*
-  (remove-if-not
-   #'(lambda (x) (and (stringp x) (not (equal x ""))))
-   (let ((home (getenv "CHICKEN_HOME")))
-     (if (and home (not (equal home "")))
-         (let ((res (split-string home ";"))) ;
-           (if (member *scheme-chicken-base-repo* res)
-               res
-             (cons *scheme-chicken-repo-dirs* res))) 
-       (list *scheme-chicken-base-repo*)))))
+(defvar scheme-module-exports-function nil
+  "Set to override the exports inferred from the implementation")
+
+(defvar *scheme-module-exports-functions*
+  '((chicken  . scheme-module-exports/chicken)
+    (gauche   . scheme-module-exports/gauche)))
+
+(defun scheme-fixup-path (path)
+  (delete-duplicates
+   (remove-if-not #'(lambda (dir)
+                      (and (stringp dir)
+                           (not (equal dir ""))
+                           (or (string-prefix-p "./" dir)
+                                  (file-directory-p dir))))
+                  path)))
+
+(defvar *scheme-chibi-repo-path* 'compute-me-later)
+(defvar *scheme-chicken-repo-path* 'compute-me-later)
+(defvar *scheme-gauche-repo-path* 'compute-me-later)
+(defvar *scheme-gauche-site-repo-path* 'compute-me-later)
+
+(defun scheme-library-path (impl)
+  (case impl
+    ((chibi)
+     (when (not (listp *scheme-chibi-repo-path*))
+       (setq *scheme-chibi-repo-path*
+             (or (scheme-fixup-path
+                  (read (scheme-shell-command-to-line
+                         "chibi-scheme -q -p '(current-module-path)'")))
+                 (list "." "./lib" "/usr/local/share/chibi"))))
+     *scheme-chibi-repo-path*)
+    ((chicken)
+     (when (not (listp *scheme-chicken-repo-path*))
+       (setq *scheme-chicken-repo-path*
+             (scheme-fixup-path
+              (let ((base
+                     (scheme-fixup-path
+                      (list (getenv "CHICKEN_HOME")
+                            (scheme-shell-command-to-line
+                             "csi -p '(repository-path)'")))))
+                (or base (list "/usr/local/lib/chicken/7"))))))
+     *scheme-chicken-repo-path*)
+    ((gauche)
+     (when (not (listp *scheme-gauche-repo-path*))
+       (setq *scheme-gauche-repo-path*
+             (scheme-fixup-path
+              (cons (scheme-shell-command-to-line "gauche-config --syslibdir")
+                    (list "/usr/share/gauche"
+                          "/usr/local/share/gauche"
+                          "/opt/share/gauche"
+                          "/opt/local/share/gauche"))))
+       (setq *scheme-gauche-site-repo-path*
+             (scheme-fixup-path
+              (cons (scheme-shell-command-to-line "gauche-config --sitelibdir")
+                    (mapcar #'(lambda (dir) (concat dir "/site/lib"))
+                            *scheme-gauche-repo-path*)))))
+     (append *scheme-gauche-site-repo-path*
+             *scheme-gauche-repo-path*))
+    (t '())))
+
+(defun scheme-r7rs-library-path (impl)
+  (scheme-fixup-path
+   (append (and (symbolp impl)
+                (list "."
+                      "./lib"
+                      (concat "/usr/local/share/snow/" (symbol-name impl))))
+           ;; default to chibi since it installs source
+           (scheme-library-path
+            (if (or (not impl) (eq 'r7rs impl))
+                (or scheme-default-implementation 'chibi)
+              impl)))))
+
+(defvar *scheme-complete-module-cache* '()
+  "Cache of module exports.")
+
+(defun scheme-module-exports (mod)
+  (unless (member mod *scheme-imported-modules*)
+    (push mod *scheme-imported-modules*)
+    (cond
+     ((and (consp mod) (eq 'srfi (car mod)))
+      (scheme-append-map #'scheme-srfi-exports (cdr mod)))
+     ((and (symbolp mod) (string-match "^srfi-" (symbol-name mod)))
+      (scheme-srfi-exports
+       (string-to-number (substring (symbol-name mod) 5))))
+     ((equal '(scheme r5rs) mod)
+      (scheme-r5rs-info))
+     ((equal '(chibi) mod)
+      (append (scheme-r5rs-info)
+              (cdr (assq (car mod) *scheme-implementation-exports*))))
+     ((and (consp mod) (eq 'scheme (car mod))
+           (cdr (assoc mod *scheme-r7rs-info*))))
+     ((and (consp mod) (null (cdr mod))
+           (cdr (assq (car mod) *scheme-implementation-exports*))))
+     ((and (symbolp mod)
+           (cdr (assq mod *scheme-implementation-exports*))))
+     (t
+      (let ((cached (assoc mod *scheme-complete-module-cache*)))
+        ;; remove stale caches
+        (when (and cached
+                   (stringp (cadr cached))
+                   (ignore-errors
+                     (let ((mtime (nth 5 (file-attributes (cadr cached))))
+                           (ptime (caddr cached)))
+                       (or (> (car mtime) (car ptime))
+                           (and (= (car mtime) (car ptime))
+                                (> (cadr mtime) (cadr ptime)))))))
+          (setq *scheme-complete-module-cache*
+                (scheme-assoc-delete-all mod *scheme-complete-module-cache*))
+          (setq cached nil))
+        (if cached
+            (cadddr cached)
+          ;; (re)compute module exports
+          (let ((export-fun
+                 (if (consp mod)
+                     #'scheme-module-exports/r7rs
+                   (or scheme-module-exports-function
+                       (cdr (assq (scheme-current-implementation)
+                                  *scheme-module-exports-functions*))
+                       #'scheme-module-exports/r7rs))))
+            (when export-fun
+              (let ((res (funcall export-fun mod)))
+                (when res
+                  (when (and scheme-complete-cache-p (car res))
+                    (push (list mod
+                                (car res)
+                                (nth 5 (file-attributes (car res)))
+                                (cadr res))
+                          *scheme-complete-module-cache*))
+                  (cadr res)))))))))))
+
+(defun scheme-module-exports/r7rs (mod)
+  (let* ((file (concat (if (symbolp mod)
+                           (subst-char-in-string ?. ?/ (symbol-name mod))
+                         (mapconcat #'(lambda (x) (if (numberp x)
+                                                 (number-to-string x)
+                                                 (symbol-name x)))
+                                    mod
+                                    "/"))
+                       *scheme-r7rs-extension*))
+         (path (scheme-r7rs-library-path (scheme-current-implementation)))
+         (dir (scheme-find-file-in-path file path)))
+    (when dir
+      (list (concat dir "/" file)
+            (scheme-with-find-file (concat dir "/" file)
+              (scheme-current-exports/typed))))))
+
+(defun scheme-module-exports/chicken (mod)
+  ;; TODO: use types.db
+  (let* ((mod-str (symbol-name mod))
+         ;; look for the source in the current directory
+         (source-file (concat mod-str ".scm"))
+         ;; try the chicken modules db
+         (modules-db (concat (scheme-library-path 'chicken) "/modules.db")))
+    (cond
+     ((eq mod 'scheme)
+      (list nil (scheme-r5rs-info)))
+     ((file-exists-p source-file)
+      (list source-file
+            (scheme-with-find-file source-file
+              (scheme-current-exports/typed))))
+     ((file-exists-p modules-db)
+      (list modules-db
+            (mapcar
+             #'(lambda (x)
+                 (cons (intern (car (split-string (substring x 1))))
+                       '((lambda ()))))
+             (remove-if-not
+              #'(lambda (x) (string-match (concat " " mod-str ")") x))
+              (scheme-file->lines modules-db))))))))
+
+(defun scheme-module-exports/gauche (mod)
+  (let* ((file (concat (subst-char-in-string ?. ?/ (symbol-name mod)) ".scm"))
+         (path (scheme-library-path 'gauche))
+         (dir (scheme-find-file-in-path file path)))
+    (when dir
+      (list
+       (concat dir "/" file)
+       (scheme-with-find-file (concat dir "/" file)
+         (or (scheme-current-exports)
+             (scheme-current-globals)))))))
 
 (defun scheme-chicken-available-modules (&optional sym)
-  (append
-   (mapcar #'symbol-name (mapcar #'car *scheme-chicken-modules*))
-   (mapcar
-    #'(lambda (f)
-        (let ((f (file-name-sans-extension f)))
-          (if (equalp "import" (file-name-extension f))
-              (file-name-sans-extension f)
-            f)))
-    (directory-files "." nil "^[^.].*\\.scm$" t))
-   (scheme-append-map
-    #'(lambda (dir)
-        (mapcar
-         #'(lambda (f)
-             (let ((f (file-name-sans-extension f)))
-               (if (equalp "import" (file-name-extension f))
-                   (file-name-sans-extension f)
-                 f)))
-         (if (string-match "/4" dir)
-             (directory-files dir nil "^[^.].*\\.import\\.\\(so\\|scm\\)$" t)
-           (directory-files dir nil "^[^.].*\\.\\(so\\|scm\\)$" t))))
-    *scheme-chicken-repo-dirs*)))
-
-(defvar *scheme-gauche-repo-path*
-  (or (car (remove-if-not #'file-directory-p
-                          '("/usr/share/gauche"
-                            "/usr/local/share/gauche"
-                            "/opt/share/gauche"
-                            "/opt/local/share/gauche")))
-      (and (fboundp 'shell-command-to-string)
-           (let* ((res (shell-command-to-string "gauche-config --syslibdir"))
-                  (res (substring res 0 (- (length res) 1))))
-             (and res (file-directory-p res)
-                  (let* ((dir (file-name-directory res))
-                         (dir2 (file-name-directory
-                                (substring dir 0 (- (length dir) 1)))))
-                    (substring dir2 0 (- (length dir2) 1))))))
-      "/usr/local/share/gauche"))
-
-(defvar *scheme-gauche-site-repo-path*
-  (concat *scheme-gauche-repo-path* "/site/lib"))
+  (mapcar
+   #'(lambda (mod) (split-string mod "\\."))
+   (append
+    (mapcar
+     #'(lambda (f)
+         (let ((f (file-name-sans-extension f)))
+           (if (equalp "import" (file-name-extension f))
+               (file-name-sans-extension f)
+             f)))
+     (directory-files "." nil "^[^.].*\\.scm$" t))
+    (scheme-append-map
+     #'(lambda (dir)
+         (mapcar
+          #'(lambda (f)
+              (let ((f (file-name-sans-extension f)))
+                (if (equalp "import" (file-name-extension f))
+                    (file-name-sans-extension f)
+                  f)))
+          (if (string-match "/7" dir)
+              (directory-files dir nil "^[^.].*\\.import\\.\\(so\\|scm\\)$" t)
+            (directory-files dir nil "^[^.].*\\.\\(so\\|scm\\)$" t))))
+     (scheme-library-path 'chicken)))))
 
 (defun scheme-gauche-available-modules (&optional sym)
-  (let ((version-dir
-         (concat
-          (car (directory-files *scheme-gauche-repo-path* t "^[0-9]"))
-          "/lib"))
-        (site-dir *scheme-gauche-site-repo-path*)
-        (other-dirs
-         (remove-if-not
-          #'(lambda (d) (and (not (equal d "")) (file-directory-p d)))
-          (split-string (or (getenv "GAUCHE_LOAD_PATH") "") ":"))))
+  (let ((path (scheme-library-path 'gauche)))
     (mapcar
-     #'(lambda (f) (subst-char-in-string ?/ ?. f))
+     #'(lambda (f) (split-string f "/"))
      (mapcar
       #'file-name-sans-extension
       (scheme-append-map
        #'(lambda (dir)
            (let ((len (length dir)))
              (mapcar #'(lambda (f) (substring f (+ 1 len)))
-                     (scheme-directory-tree-files dir t "\\.scm"))))
-       (cons version-dir (cons site-dir other-dirs)))))))
+                     (scheme-directory-tree-files dir t "\\.scm\\'"))))
+       path)))))
+
+(defun scheme-r7rs-available-modules (&optional impl)
+  (let ((path (scheme-r7rs-library-path
+               (or impl (scheme-current-implementation)))))
+    (mapcar
+     #'(lambda (f) (split-string f "/+" t))
+     (mapcar
+      #'file-name-sans-extension
+      (scheme-append-map
+       #'(lambda (dir)
+           (let ((len (length dir)))
+             (mapcar #'(lambda (f) (substring f (+ 1 len)))
+                     (scheme-directory-tree-files dir t "\\.sld\\'"))))
+       path)))))
+
+(defun scheme-available-modules (&optional impl)
+  (case impl
+    ((chicken) (scheme-chicken-available-modules impl))
+    ((gauche) (scheme-gauche-available-modules impl))
+    (t (scheme-r7rs-available-modules impl))))
+
+(defun scheme-library-completions (prefix)
+  (let ((libs (scheme-available-modules (scheme-current-implementation))))
+    (while (consp prefix)
+      (let* ((s (pop prefix))
+             (str (cond ((symbolp s) (symbol-name s))
+                        ((numberp s) (number-to-string s))
+                        (t s))))
+        (setq libs (mapcar #'cdr (remove-if-not
+                                  #'(lambda (x) (equal str (car x)))
+                                  libs)))))
+    (remove-duplicates (remove nil (mapcar #'car libs)) :test #'equal)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; utilities
+
+(defun scheme-assoc-delete-all (key alist)
+  (while (and (consp (car alist))
+              (equal (car (car alist)) key))
+    (setq alist (cdr alist)))
+  (let ((tail alist) tail-cdr)
+    (while (setq tail-cdr (cdr tail))
+      (if (and (consp (car tail-cdr))
+               (equal (car (car tail-cdr)) key))
+          (setcdr tail (cdr tail-cdr))
+        (setq tail tail-cdr))))
+  alist)
 
 (defun scheme-append-map (proc init-ls)
   (if (null init-ls)
@@ -2971,11 +2822,18 @@
         (nth 3 parses)))))
 
 (defun scheme-beginning-of-sexp ()
-  (let ((syn (char-syntax (char-before (point)))))
-    (if (or (eq syn ?\()
-	    (and (eq syn ?\") (scheme-in-string-p)))
-	(forward-char -1)
-      (forward-sexp -1))))
+  (ignore-errors
+    (let ((syn (char-syntax (char-before (point)))))
+     (if (or (eq syn ?\()
+             (and (eq syn ?\") (scheme-in-string-p)))
+         (forward-char -1)
+       (forward-sexp -1)))))
+
+(defun scheme-shell-command-to-line (cmd)
+  (and (fboundp 'shell-command-to-string)
+       (let* ((res (shell-command-to-string cmd))
+              (len (length res)))
+         (and (> len 0) (substring res 0 (- len 1))))))
 
 (defun scheme-find-file-in-path (file path)
   (car (remove-if-not
@@ -2995,16 +2853,17 @@
                            (and buf-file
                                 (equal ,path (file-truename buf-file)))))
                      (buffer-list))))
-         (if ,buf
-             (switch-to-buffer ,buf)
-           (switch-to-buffer (find-file-noselect ,path t)))
-         (let ((,res (ignore-errors (save-excursion ,@body))))
+         (set-buffer (or ,buf (find-file-noselect ,path t)))
+         (let ((,res (ignore-errors
+                       (save-excursion
+                         (goto-char (point-min))
+                         ,@body))))
            (unless ,buf (kill-buffer (current-buffer)))
            ,res)))))
 
 (defun scheme-directory-tree-files (init-dir &optional full match)
   (let ((res '())
-        (stack (list init-dir)))
+        (stack (if (file-directory-p init-dir) (list init-dir) '())))
     (while (consp stack)
       (let* ((dir (pop stack))
              (files (remove-if #'(lambda (f) (or (equal f ".") (equal f "..")))
@@ -3060,6 +2919,27 @@
            (list sym1 pos1 (scheme-symbol-at-point) pos2)))
        (list sym1 pos1 nil 0)))))
 
+(defun scheme-preceding-sexps ()
+  (save-excursion
+    (let ((end (point))
+          (res '()))
+      (scheme-beginning-of-current-sexp-operator)
+      (ignore-errors
+        (while (< (point) end)
+          (let ((x (scheme-nth-sexp-at-point 0)))
+            (forward-sexp 1)
+            (when (< (point) end)
+              (push x res)))))
+      (reverse res))))
+
+(defun scheme-sexp->elisp (str)
+  "Hack to handle differences between scheme and elisp sexp syntax."
+  (replace-regexp-in-string
+    "#\\\\" "?"
+   (replace-regexp-in-string
+    "#t\\(rue\\)?\\>" "t"
+    (replace-regexp-in-string "#f\\(alse\\)?\\>" "nil" str))))
+
 ;; sexp-at-point is always fragile, both because the user can input
 ;; incomplete sexps and because some scheme sexps are not valid elisp
 ;; sexps.  this is one of the few places we use it, so we're careful
@@ -3070,28 +2950,36 @@
       (forward-sexp (+ n 1))
       (let ((end (point)))
         (forward-sexp -1)
-        (car (read-from-string (buffer-substring-no-properties (point) end)))))))
+        (let ((str (buffer-substring-no-properties (point) end)))
+          (car (or (ignore-errors (read-from-string str))
+                   (read-from-string (scheme-sexp->elisp str)))))))))
 
 (defun scheme-symbol-at-point ()
+  (let ((str (scheme-symbol-string-at-point)))
+    (and str (intern str))))
+
+(defun scheme-symbol-string-at-point ()
   (save-excursion
     (skip-syntax-backward "w_")
     (let ((start (point)))
       (skip-syntax-forward "w_")
       (and (< start (point))
-           (intern (buffer-substring-no-properties start (point)))))))
+           (buffer-substring-no-properties start (point))))))
 
 ;; should be called from start of current top-level
 (defun scheme-goto-next-top-level (&optional in-mod-p)
   (let ((here (point)))
-    (or (ignore-errors (forward-sexp 2) (forward-sexp -1)
-                               (< here (point)))
+    (or (ignore-errors (forward-sexp 2)
+                       (forward-sexp -1)
+                       (< here (point)))
         (if in-mod-p
             (progn (goto-char here)
                    ;; heuristic, if the parens are unbalanced look
                    ;; for a define starting after a blank line.
                    ;; better might be to assume they're using a
                    ;; consistent indentation for the module body.
-                   (and (re-search-forward "\n\\s-*\n\\(;[^\n]*\n\\)?\\s-*(" nil t)
+                   (and (re-search-forward
+                         "\n\\s-*\n\\(;[^\n]*\n\\)?\\s-*(" nil t)
                         (progn (backward-char 1) t)))
           (or (ignore-errors (end-of-defun) (end-of-defun)
                              (beginning-of-defun)
@@ -3099,7 +2987,8 @@
               (progn (goto-char here)
                      (forward-char)
                      ;; allow for prompts in inferior-scheme mode
-                     (and (re-search-forward "^\\(\\(#;\\|[0-9]*\\)?\\sw*=?\]?> *\\)?(" nil t)
+                     (and (re-search-forward
+                           "^\\(\\(#;\\|[0-9]*\\)?\\sw*=?\]?> *\\)?(" nil t)
                           (progn (backward-char 1) t)))))
         (goto-char (point-max)))))
 
@@ -3114,8 +3003,7 @@
          (let ((op (scheme-symbol-at-point)))
            (cond
             ((eq op 'lambda)
-             (let ((params
-                    (scheme-nth-sexp-at-point 1)))
+             (let ((params (scheme-nth-sexp-at-point 1)))
                `(lambda ,params)))
             (t
              (let ((spec (scheme-env-lookup env op)))
@@ -3130,7 +3018,8 @@
     ((?\w)
      (if (string-match "[0-9]" (string (char-after)))
          'number
-       nil))
+       (let ((sym (scheme-symbol-at-point)))
+         (scheme-env-lookup env sym))))
     (t
      nil)))
 
@@ -3233,83 +3122,8 @@
             (goto-char (if (or pos (not end)) limit (+ end 1)))))))
       match-vars)))
 
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; You can set the *scheme-default-implementation* to your preferred
-;; implementation, for when we can't figure out the file from
-;; heuristics.  Alternately, in any given buffer, just
-;;
-;; (setq *scheme-current-implementation* whatever)
-
-(defgroup scheme-complete nil
-  "Smart tab completion"
-  :group 'scheme)
-
-(defcustom scheme-default-implementation nil
-  "Default scheme implementation to provide completion for
-when scheme-complete can't infer the current implementation."
-  :type 'symbol
-  :group 'scheme-complete)
-
-(defcustom scheme-always-use-default-implementation-p nil
-  "Always use `scheme-default-implementation' instead of heuristics."
-  :type 'symbol
-  :group 'scheme-complete)
-
-(defcustom scheme-complete-smart-indent-p t
-  "Toggles using `scheme-smart-indent' for `scheme-complete-or-indent'."
-  :type 'boolean
-  :group 'scheme-complete)
-
-(defcustom scheme-indent-before-complete-p nil
-  "Toggles indenting the current line before completing."
-  :type 'boolean
-  :group 'scheme-complete)
-
-(defcustom scheme-complete-empty-tab-behavior 'complete
-  "Behavior for `scheme-complete-or-indent' when completing an empty symbol.
-A value of `complete' (the default) will complete all symbols
-elligible according to the normal type inference rules.  Since
-they are not being filtered by any prefix, the list may be long -
-you can scroll through it or switch to the *Completions* buffer
-to view it.  A value of `indent' will assume you meant to indent
-at that location, and `beep' will just beep and do nothing."
-  :type '(choice (const complete) (const indent) (const beep))
-  :group 'scheme-complete)
-
-(defcustom scheme-complete-from-end-of-symbol-p t
-  "If true jump to the end when completing from the middle of a symbol."
-  :type 'boolean
-  :group 'scheme-complete)
-
-(defcustom scheme-complete-cache-p t
-  "Toggles caching of module/load export information."
-  :type 'boolean
-  :group 'scheme-complete)
-
-;; (defcustom scheme-complete-learn-syntax-p nil
-;;   "Toggles parsing of syntax-rules macros for completion info."
-;;   :type 'boolean
-;;   :group 'scheme-complete)
-
-(defcustom scheme-interleave-definitions-p nil
-  "Allow internal defines to be mixed with expressions."
-  :type 'boolean
-  :group 'scheme-complete)
-
-(defvar *scheme-complete-module-cache* '())
-
-(defvar *scheme-current-implementation* nil)
-(make-variable-buffer-local '*scheme-current-implementation*)
-
-;; most implementations use their name as the script name
-(defvar *scheme-interpreter-alist*
-  '(("csi"  . chicken)
-    ("gosh" . gauche)
-    ("gsi"  . gambit)
-    ("mred" . mzscheme)
-    ))
-
-(defvar *scheme-imported-modules* '())
+(defvar *scheme-imported-modules* '()
+  "Dynamically shadowed in scheme-current-imports.")
 
 (defun scheme-guess-implementation ()
   (save-excursion
@@ -3319,19 +3133,16 @@ at that location, and `beep' will just beep and do nothing."
           (let ((script (file-name-nondirectory (match-string 1))))
             (cdr (assoc script *scheme-interpreter-alist*))))
      (cond
+      ((re-search-forward "(define-library +\\(.\\)" nil t)
+       'r7rs)
       ((re-search-forward "(define-module +\\(.\\)" nil t)
        (if (equal "(" (match-string 1))
            'guile
          'gauche))
       ((re-search-forward "(\\(?:use\\|require-library\\) " nil t)
        'chicken)
-      ((re-search-forward
-        "#\\(?:lang\\|reader\\)" nil t)
-       'mzscheme)
       ((re-search-forward "(module\\s-" nil t)
-       (if (eq scheme-default-implementation 'mzscheme)
-           (if (looking-at "\\s-*\\sw") 'chicken 'mzscheme)
-         (if (looking-at "\\s-*(") 'mzscheme 'chicken)))))))
+       'chicken)))))
 
 (defun scheme-current-implementation ()
   (when (and (not *scheme-current-implementation*)
@@ -3394,7 +3205,7 @@ at that location, and `beep' will just beep and do nothing."
                              limit))))
                       vars)))
               ((let let* letrec letrec* let-syntax letrec-syntax
-                and-let* do loop)
+                    and-let* do loop)
                (or
                 (ignore-errors
                   (save-excursion
@@ -3431,7 +3242,8 @@ at that location, and `beep' will just beep and do nothing."
                                       (scheme-nth-sexp-at-point 1)))
                              vars)))
               (t
-               (if (string-match "^\\(jazz\\.\\)?define\\(-.*\\)?" (symbol-name sym))
+               (if (string-match "^\\(jazz\\.\\)?define\\(-.*\\)?"
+                                 (symbol-name sym))
                    (let ((defs (save-excursion
                                  (backward-char)
                                  (scheme-extract-definitions))))
@@ -3567,24 +3379,30 @@ at that location, and `beep' will just beep and do nothing."
       (while (not (eobp))
         (when (eq ?\( (char-after))
           (forward-char 1)
-          (when (not (eq ?\( (char-after)))
-            (let ((sym (scheme-symbol-at-point)))
-              (cond
-               ((memq sym '(module library))
-                (forward-sexp 3)
-                (forward-sexp -1)
-                (setq in-mod-p t))
-               ((scheme-module-symbol-p sym)
-                (forward-char -1)
-                (ignore-errors
-                  (setq imports
-                        (append (scheme-extract-sexp-imports
-                                 (scheme-nth-sexp-at-point 0))
-                                imports))))
-               (t
-                (forward-char -1))))))
+          (let ((sym (and (not (eq ?\( (char-after)))
+                          (scheme-symbol-at-point))))
+            (cond
+             ((memq sym '(module library))
+              (forward-sexp 3)
+              (forward-sexp -1)
+              (setq in-mod-p t))
+             ((eq sym 'define-library)
+              (forward-sexp 1)
+              (setq in-mod-p t))
+             ((scheme-module-symbol-p sym)
+              (forward-char -1)
+              (ignore-errors
+                (let* ((decl (scheme-nth-sexp-at-point 0))
+                       (res (scheme-extract-sexp-imports decl)))
+                  (setq imports (append res imports)))))
+             (t
+              (forward-char -1)))))
         (scheme-goto-next-top-level in-mod-p)))
     imports))
+
+(defun scheme-file-imports (file)
+  (scheme-with-find-file file
+    (scheme-current-imports)))
 
 ;; we should be just inside the opening paren of an expression
 (defun scheme-name-of-define ()
@@ -3595,7 +3413,7 @@ at that location, and `beep' will just beep and do nothing."
     (and (memq (char-syntax (char-after)) '(?\w ?\_))
          (scheme-symbol-at-point))))
 
-(defun scheme-type-of-define ()
+(defun scheme-type-of-define (&optional env)
   (save-excursion
     (scheme-beginning-of-next-sexp)
     (cond
@@ -3603,7 +3421,7 @@ at that location, and `beep' will just beep and do nothing."
       `(lambda ,(cdr (scheme-nth-sexp-at-point 0))))
      (t
       (ignore-errors (scheme-beginning-of-next-sexp)
-                     (scheme-sexp-type-at-point))))))
+                     (scheme-sexp-type-at-point env))))))
 
 ;; we should be at the opening paren of an expression
 (defun scheme-extract-definitions (&optional env)
@@ -3616,7 +3434,7 @@ at that location, and `beep' will just beep and do nothing."
          (list (list (scheme-name-of-define) '(syntax))))
         ((define define-inline define-constant define-primitive defun)
          (let ((name (scheme-name-of-define))
-               (type (scheme-type-of-define)))
+               (type (scheme-type-of-define env)))
            (list (if type (list name type) (list name)))))
         ((defvar define-class)
          (list (list (scheme-name-of-define) 'non-procedure)))
@@ -3652,65 +3470,67 @@ at that location, and `beep' will just beep and do nothing."
         ((begin progn)
          (forward-sexp)
          (scheme-current-definitions))
+        ((include include-ci)
+         (scheme-append-map
+          #'(lambda (file)
+              (scheme-with-find-file file
+                (scheme-current-globals)))
+          (ignore-errors (cdr (scheme-nth-sexp-at-point 0)))))
         (t
          '())))))
 
-(defun scheme-in-defun-name ()
-  (save-excursion
-    (dotimes (i 2)
-      (scheme-beginning-of-sexp)
-      (backward-char))
-    (and (save-excursion
-           (beginning-of-line)
-           (looking-at "\\s-*(define"))
-         (point))))
+(defun scheme-in-define-name ()
+  (ignore-errors
+    (save-excursion
+     (dotimes (i 2)
+       (scheme-beginning-of-sexp)
+       (backward-char))
+     (and (save-excursion
+            (beginning-of-line)
+            (looking-at "\\s-*(define"))
+          (point)))))
 
-;; a little more liberal than -definitions, we try to scan to a new
-;; top-level form (i.e. a line beginning with an open paren) if
+;; a little more liberal than -extract-definitions, we try to scan to
+;; a new top-level form (i.e. a line beginning with an open paren) if
 ;; there's an error during normal sexp movement
-(defun scheme-current-globals ()
-  (let ((here (point))
+(defun scheme-current-globals (&optional env)
+  (let ((res '())
         (in-mod-p nil)
-        (skip (scheme-in-defun-name))
-        (globals '())
-        (end (point-max)))
+        (skip (scheme-in-define-name)))
     (save-excursion
       (goto-char (point-min))
-      (or (ignore-errors (end-of-defun) (backward-sexp) t)
-          (and (re-search-forward "^(" nil t) (progn (backward-char) t))
+      (or (ignore-errors (end-of-defun) (beginning-of-defun) t)
+          (re-search-forward "^(" nil t)
           (goto-char (point-max)))
-      ;; scan over each top-level form
-      (while (< (point) end)
-        (cond
-         ((and (< (point) here) (looking-at "(\\(module\\|library\\)\\s-"))
-          ;; module definition
-          (let ((module-end (ignore-errors
-                              (save-excursion (forward-sexp) (point)))))
-            (cond
-             ((or (not module-end) (< here module-end)) ; inside the module
-              ;; setup to only parse until the module end, continue
-              ;; scanning top-level module forms
-              (setq globals '())
-              (setq in-mod-p t)
-              (when module-end
-                (setq end module-end))
-              (forward-word 1)  ;; skip the module/library word
-              (forward-sexp 1)  ;; skip the module name
-              (scheme-beginning-of-next-sexp))
-             (t ;; we're not completing from inside the module, skip
-                ;; the module definition altogether
-              (forward-sexp 1)
-              (scheme-goto-next-top-level nil)))))
-         (t
-          ;; other form, extract the definitions unless it's a
-          ;; definition for which we're trying to complete the name
-          (if (not (eq (point) skip))
-              (setq globals
-                    (append
-                     (ignore-errors (scheme-extract-definitions))
-                     globals)))
-          (scheme-goto-next-top-level in-mod-p)))))
-    globals))
+      (while (not (eobp))
+        (when (and (eq ?\( (char-syntax (char-after)))
+                   (eq ?w (char-syntax (char-after (1+ (point))))))
+          (let ((sym (save-excursion (forward-char) (scheme-symbol-at-point))))
+            (case sym
+              ((module define-module define-library)
+               (setq in-mod-p t)
+               (forward-char))
+              ((include include-ci)
+               (let* ((files (cdr (scheme-nth-sexp-at-point 0)))
+                      (defs (scheme-append-map
+                             #'(lambda (file)
+                                 (scheme-with-find-file file
+                                   (scheme-current-globals env)))
+                             files)))
+                 (setq res (append defs res))))
+              ((begin)
+               (save-excursion
+                 (forward-char)
+                 (setq res
+                       (append (ignore-errors (scheme-extract-definitions env))
+                               res))))
+              (t
+               (unless (eq (point) skip)
+                 (setq res
+                       (append (ignore-errors (scheme-extract-definitions env))
+                               res)))))))
+        (scheme-goto-next-top-level in-mod-p)))
+    res))
 
 ;; for internal defines, etc.
 (defun scheme-current-definitions (&optional enclosing-end)
@@ -3732,7 +3552,8 @@ at that location, and `beep' will just beep and do nothing."
     defs))
 
 (defun scheme-current-exports ()
-  (let ((res '()))
+  (let ((res '())
+        (in-mod-p nil))
     (save-excursion
       (goto-char (point-min))
       (or (ignore-errors (end-of-defun) (beginning-of-defun) t)
@@ -3743,13 +3564,9 @@ at that location, and `beep' will just beep and do nothing."
                    (eq ?w (char-syntax (char-after (1+ (point))))))
           (let ((sym (save-excursion (forward-char) (scheme-symbol-at-point))))
             (case sym
-              ((declare define-module)
-               (let ((decls (scheme-nth-sexp-at-point 0)))
-                 (cond
-                  ((and (listp decls) (assq 'export decls))
-                   (setq res (nconc (cdr (assq 'export decls)) res)))
-                  ((and (listp decls) (assq 'export-all decls))
-                   (goto-char (point-max))))))
+              ((define-module define-library)
+               (setq in-mod-p t)
+               (forward-char))
               ((export provide)
                (unless (and (eq 'provide sym)
                             (eq 'chicken (scheme-current-implementation)))
@@ -3772,158 +3589,20 @@ at that location, and `beep' will just beep and do nothing."
                    (goto-char (point-max)))
                   ((listp x)
                    (setq res
-                         (nconc (remove-if-not #'symbolp (cdr x)) res))))))
-              )))
-        (scheme-goto-next-top-level)))
+                         (nconc (remove-if-not #'symbolp (cdr x)) res)))))))))
+        (scheme-goto-next-top-level in-mod-p)))
     res))
 
-(defun scheme-srfi-exports (i)
-  (and (integerp i)
-       (>= i 0)
-       (< i (length *scheme-srfi-info*))
-       (let ((info (cdr (aref *scheme-srfi-info* i))))
-         (if (and (consp info) (null (cdr info)) (symbolp (car info)))
-             (scheme-module-exports (car info))
-           info))))
-
-(defvar scheme-module-exports-function nil)
-
-(defvar *scheme-module-exports-functions*
-  '((chicken  . scheme-module-exports/chicken)
-    (gauche   . scheme-module-exports/gauche)
-    (mzscheme . scheme-module-exports/mzscheme)))
-
-(defun scheme-module-exports (mod)
-  (unless (member mod *scheme-imported-modules*)
-    (push mod *scheme-imported-modules*)
-    (cond
-     ((and (consp mod) (eq 'srfi (car mod)))
-      (scheme-append-map #'scheme-srfi-exports (cdr mod)))
-     ((and (symbolp mod) (string-match "^srfi-" (symbol-name mod)))
-      (scheme-srfi-exports
-       (string-to-number (substring (symbol-name mod) 5))))
-     (t
-      (let ((cached (assq mod *scheme-complete-module-cache*)))
-        ;; remove stale caches
-        (when (and cached
-                   (stringp (cadr cached))
-                   (ignore-errors
-                     (let ((mtime (nth 5 (file-attributes (cadr cached))))
-                           (ptime (caddr cached)))
-                       (or (> (car mtime) (car ptime))
-                           (and (= (car mtime) (car ptime))
-                                (> (cadr mtime) (cadr ptime)))))))
-          (setq *scheme-complete-module-cache*
-                (assq-delete-all mod *scheme-complete-module-cache*))
-          (setq cached nil))
-        (if cached
-            (cadddr cached)
-          ;; (re)compute module exports
-          (let ((export-fun
-                 (or scheme-module-exports-function
-                     (cdr (assq (scheme-current-implementation)
-                                *scheme-module-exports-functions*)))))
-            (when export-fun
-              (let ((res (funcall export-fun mod)))
-                (when res
-                  (when (and scheme-complete-cache-p (car res))
-                    (push (list mod
-                                (car res)
-                                (nth 5 (file-attributes (car res)))
-                                (cadr res))
-                          *scheme-complete-module-cache*))
-                  (cadr res)))))))))))
-
-(defun scheme-module-exports/chicken (mod)
-  (let ((predefined (assq mod *scheme-chicken-modules*)))
-    (if predefined
-        (list nil (cdr predefined))
-      (let* ((mod-str (symbol-name mod))
-             (export-file
-              (concat *scheme-chicken-base-repo* "/" mod-str ".exports"))
-             (setup-file
-              (concat *scheme-chicken-base-repo* "/" mod-str ".setup-info"))
-             ;; look for the source in the current directory
-             (source-file (concat mod-str ".scm"))
-             ;; try the chicken 4 modules db
-             (modules-db (concat *scheme-chicken-base-repo* "/modules.db")))
-        (cond
-         ((eq mod 'scheme)
-          (list nil *scheme-r5rs-info*))
-         ((eq mod 'chicken)
-          (list nil (cdr (assq 'chicken *scheme-implementation-exports*))))
-         ((file-exists-p source-file)
-          (list source-file
-                (scheme-with-find-file source-file
-                  (let ((env (scheme-current-globals))
-                        (exports (scheme-current-exports)))
-                    (if (consp exports)
-                        (remove-if-not #'(lambda (x) (memq (car x) exports)) env)
-                      env)))))
-         ((file-exists-p export-file)
-          (list export-file
-                (mapcar #'(lambda (x) (cons (intern x) '((lambda obj))))
-                        (scheme-file->lines export-file))))
-         (t
-          (let ((setup-file-exports
-                 (and (file-exists-p setup-file)
-                      (scheme-with-find-file setup-file
-                        (let* ((alist (scheme-nth-sexp-at-point 0))
-                               (cell (assq 'exports alist)))
-                          (cdr cell))))))
-            (cond
-             (setup-file-exports
-              (list setup-file
-                    (mapcar #'(lambda (x) (cons (intern x) '((lambda obj))))
-                            setup-file-exports)))
-             ((file-exists-p modules-db)
-              (list modules-db
-                    (mapcar
-                     #'(lambda (x)
-                         (cons (intern (car (split-string (substring x 1))))
-                               '((lambda ()))))
-                     (remove-if-not
-                      #'(lambda (x) (string-match (concat " " mod-str ")") x))
-                      (scheme-file->lines modules-db))))))))
-         )))))
-
-(defun scheme-module-exports/gauche (mod)
-  (let* ((file (concat (subst-char-in-string ?. ?/ (symbol-name mod)) ".scm"))
-         (dir
-          (scheme-find-file-in-path
-           file
-           (cons
-            (concat *scheme-gauche-site-repo-path* "/site/lib")
-            (mapcar
-             #'(lambda (x) (concat x "/lib"))
-             (reverse
-              (directory-files *scheme-gauche-repo-path* t "^[0-9]")))))))
-    (when dir
-      (list
-       (concat dir "/" file)
-       (scheme-with-find-file (concat dir "/" file)
-         (let ((env (scheme-current-globals))
-               (exports (scheme-current-exports)))
-           (if (consp exports)
-               (remove-if-not #'(lambda (x) (memq (car x) exports)) env)
-             env)))))))
-
-(defun scheme-module-exports/mzscheme (mod)
-  (let ((dir (scheme-find-file-in-path
-              (symbol-name mod)
-              '("."
-                "/usr/local/lib/plt/collects"
-                "/usr/local/lib/plt/collects/mzlib"))))
-    (when dir
-      ;; XXXX parse, don't use regexps
-      (list
-       (concat dir "/" (symbol-name mod))
-       (scheme-with-find-file (concat dir "/" (symbol-name mod))
-         (when (re-search-forward "(provide" nil t)
-           (backward-sexp)
-           (backward-char)
-           (mapcar #'list (cdr (ignore-errors (scheme-nth-sexp-at-point 0))))
-           ))))))
+(defun scheme-current-exports/typed ()
+  (let* ((exports (scheme-current-exports))
+         (imports (and scheme-complete-recursive-inference-p
+                       (ignore-errors (scheme-current-imports))))
+         (globals (ignore-errors (scheme-current-globals (list imports))))
+         (env (append imports globals)))
+    (message "exports: %s" exports)
+    (if exports
+        (remove-if-not #'(lambda (x) (memq (car x) exports)) env)
+      env)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; This is rather complicated because we want to auto-generate
@@ -3943,21 +3622,23 @@ at that location, and `beep' will just beep and do nothing."
       ((z) 'complex)
       ((x1 x2 x3 y timeout seconds nanoseconds) 'real)
       ((i j k n m int index size count len length bound nchars start end
-        pid uid gid fd fileno errno)
+        pid uid gid fd fileno errno u8 byte)
        'integer)
       ((ch) 'char)
       ((str name pattern) 'string)
       ((file path pathname) 'filename)
       ((dir dirname) 'directory)
       ((sym id identifier) 'symbol)
-      ((ls lis lst alist lists) 'list)
-      ((vec) 'vector)
-      ((exc excn err error) 'exception)
+      ((ls lis lst list alist lists) 'list)
+      ((vec vector) 'vector)
+      ((bv bvec bytevector byte-vector) 'bytevector)
+      ((ht hashtable hash-table) 'hash-table)
+      ((exc excn exn err error) 'exception)
       ((ptr) 'pointer)
       ((bool) 'boolean)
       ((env) 'environment)
       ((char string boolean number complex real integer procedure char-set
-        port input-port output-port pair list vector array stream hash-table
+        port input-port output-port pair vector array stream
         thread mutex condition-variable time exception date duration locative
         random-source state condition condition-type queue pointer
         u8vector s8vector u16vector s16vector u32vector s32vector
@@ -4100,45 +3781,171 @@ at that location, and `beep' will just beep and do nothing."
       (setq spec (assq sym (pop ls))))
     spec))
 
-(defun scheme-inside-module-p ()
+(defun scheme-inside-top-level-p (pat)
   (save-excursion
-    (ignore-errors
-      (let ((here (point))
-            res)
-        (goto-char (point-min))
-        (while (< (point) here)
-          (if (not (re-search-forward "^(\\(?:module\\|library\\)\\s-"))
-              (goto-char (point-max))
-            (beginning-of-line)
-            (let ((mod-point (point)))
-              (if (ignore-errors (forward-sexp) t)
-                  (if (and (<= mod-point here) (<= here (point)))
-                      (setq res t))
-                (setq res (<= mod-point here))
-                (goto-char (point-max))))))
-        res))))
+    (beginning-of-defun)
+    (looking-at pat)))
+
+(defun scheme-inside-module-p ()
+  (scheme-inside-top-level-p "^(\\(?:module\\|library\\)\\s-"))
+
+(defun scheme-inside-define-library-p ()
+  (scheme-inside-top-level-p "^(define-library\\s-"))
+
+(defun scheme-inside-define*-p ()
+  (scheme-inside-top-level-p
+   "^(\\(?:define-library\\|define-syntax\\|define\\)\\s-"))
+
+(defun scheme-inside-library-begin-p ()
+  (let ((res nil))
+    (save-excursion
+      (while (and (not (bobp))
+                  (ignore-errors
+                    (scheme-beginning-of-sexp)
+                    (backward-char)
+                    t))
+        (when (looking-at "(begin\\(\\s-\\|\n\\)")
+          (setq res t)
+          (goto-char (point-min)))))
+    res))
+
+(defun scheme-library-decl-includes (decl base)
+  (case (and (consp decl) (car decl))
+    ((include include-ci)
+     (list '()
+           (mapcar #'(lambda (f) (concat (file-name-directory base) f))
+                   (cdr decl))))
+    ((include-library-declarations)
+     (let* ((file (concat (file-name-directory base) (cadr decl)))
+            (res (scheme-library-includes file t)))
+       `((,file ,@(car res)) ,(cadr res))))
+    ((cond-expand)
+     (let ((x
+            (map
+             #'(lambda (clause) (scheme-library-decl-includes (cadr clause)))
+             (cdr decl))))
+       (list (scheme-append-map #'car x)
+             (scheme-append-map #'cadr x))))
+    (t
+     (list '() '()))))
+
+(defun scheme-library-includes (base &optional flatp)
+  (let ((decls '())
+        (files '()))
+    (scheme-with-find-file base
+      (let ((limit (point-max)))
+        (when (not flatp)
+          (re-search-forward "^(define-library\\s-")
+          (forward-sexp 1))
+        (while (< (point) limit)
+          (let* ((decl (scheme-nth-sexp-at-point 0))
+                 (includes (and decl (scheme-library-decl-includes decl base))))
+            (when includes
+              (setq decls (append decls (car includes)))
+              (setq files (append files (cadr includes))))
+            (scheme-goto-next-top-level (not flatp))))))
+    (list decls files)))
+
+(defun scheme-library-include-type (base file)
+  (let ((decls+files (scheme-library-includes base)))
+    (cond ((member file (car decls+files)) 'r7rs-library-declaration)
+          ((member file (cadr decls+files)) 'r7rs))))
+
+;; Returns (<lang> <define-library-file>)
+;; where <lang> is one of:
+;;  - r7rs-library-declaration
+;;  - r7rs
+;;  - r5rs
+;; and <define-library-file> is the file containing the
+;; enclosing library declaration, or nil for programs.
+(defun scheme-code-context (file)
+  (cond
+   ((scheme-inside-define-library-p)
+    (list (if (scheme-inside-library-begin-p)
+              'r7rs
+            'r7rs-library-declaration)
+          file))
+   ((not *scheme-use-r7rs*)
+    (if (scheme-inside-module-p)
+        (list 'r5rs (buffer-file-name (current-buffer)))
+      (list 'r5rs nil)))
+   (t
+    (or *scheme-current-context*
+        (let ((res (scheme-code-context/uncached file)))
+          ;; cache if we don't expect the context to change
+          (when (and (car res) (cadr res))
+            (setq *scheme-current-context* res))
+          res)))))
+
+(defun scheme-code-context/uncached (file)
+  ;; check for including library files, starting with the same named .sld
+  (let* ((sld (concat (file-name-sans-extension file)
+                      *scheme-r7rs-extension*))
+         (include-type (scheme-library-include-type sld file)))
+    (unless include-type
+      (let ((dir (file-name-directory file))
+            (count 0)
+            (sld-pat
+             (concat (regexp-quote *scheme-r7rs-extension*) "\\'")))
+        (while (and (< count *scheme-max-decl-file-search-depth*)
+                    (not (member dir '(nil "" "/" "./"))))
+          (let ((sld-ls (directory-files dir t sld-pat)))
+            (while (consp sld-ls)
+              (setq sld (pop sld-ls))
+              (setq include-type (scheme-library-include-type sld file))
+              (when include-type
+                (setq sld-ls '()
+                      dir "/"))))
+          (incf count)
+          (setq dir (file-name-directory
+                     (replace-regexp-in-string "/+\\'" "" dir))))))
+    (if include-type
+        (list include-type sld)
+      (list 'r7rs nil))))
 
 (defun scheme-current-env ()
-  (let ((in-mod-p (scheme-inside-module-p)))
-    ;; r5rs
-    (let ((env (if in-mod-p
-                   '(((import
-                       (special symbol scheme-chicken-available-modules))))
-                 (list *scheme-r5rs-info*))))
-      ;; base language
-      (let ((base (cdr (assq (scheme-current-implementation)
-                             *scheme-implementation-exports*))))
-        (if (and base (not in-mod-p)) (push base env)))
-      ;; imports
-      (let ((imports (ignore-errors (scheme-current-imports))))
-        (if imports (push imports env)))
-      ;; top-level defs
-      (let ((top (ignore-errors (scheme-current-globals))))
-        (if top (push top env)))
-      ;; current local vars
-      (let ((locals (ignore-errors (scheme-current-local-vars env))))
-        (if locals (push locals env)))
-      env)))
+  (let* ((file (buffer-file-name (current-buffer)))
+         (lang+base (scheme-code-context file))
+         (lang (car lang+base))
+         (base (cadr lang+base)))
+    ;; base language
+    (case lang
+     ((r7rs-library-declaration)
+      (let ((enclosing (scheme-enclosing-2-sexp-prefixes)))
+        (cond
+         ((eq 'import (caddr enclosing))
+          (list (mapcar #'list
+                        (mapcar #'intern
+                                (scheme-library-completions
+                                 (scheme-preceding-sexps))))))
+         ((eq 'import (car enclosing)) nil)
+         (t (list *scheme-r7rs-lib-decl-info*)))))
+     ((r5rs)
+      (let* ((env (if base
+                      '(((import
+                          (special list scheme-available-modules))))
+                    (list (scheme-r5rs-info))))
+             (base (cdr (assq (scheme-current-implementation)
+                              *scheme-implementation-exports*))))
+        (if (and base (not in-mod-p)) (push base env))
+        env))
+     (t ; r7rs
+      (let ((env '()))
+        ;; imports
+        (let ((imports (ignore-errors (scheme-file-imports (or base file)))))
+          (if imports (push imports env)))
+        ;; top-level defs
+        (let ((top (ignore-errors (scheme-current-globals))))
+          (if top (push top env)))
+        ;; current local vars
+        (let ((locals (ignore-errors (scheme-current-local-vars env))))
+          (if locals (push locals env)))
+        ;; define-library/import
+        (unless env
+          (push '((define-library (syntax clause))) env))
+        (unless (scheme-inside-define*-p)
+          (push '((import (special list scheme-available-modules))) env))
+        env)))))
 
 (defun scheme-env-filter (pred env)
   (mapcar #'car
@@ -4239,7 +4046,7 @@ at that location, and `beep' will just beep and do nothing."
    nil
    (mapcar
     #'(lambda (line)
-        (and (not (string-match "^[ 	]*#" line))
+        (and (not (string-match "^[  ]*#" line))
              (or (not pat) (string-match pat line))
              (string-match "^\\([^:]*\\):" line)
              (match-string 1 line)))
@@ -4285,7 +4092,7 @@ at that location, and `beep' will just beep and do nothing."
          (let ((rx (concat "^\\(" (regexp-quote (if (symbolp sym)
                                                     (symbol-name sym)
                                                   sym))
-                           "[^ 	]*\\)"))
+                           "[^  ]*\\)"))
                (res '()))
            (while (not (eobp))
              (if (not (re-search-forward rx nil t))
@@ -4329,6 +4136,9 @@ at that location, and `beep' will just beep and do nothing."
         (trans (and (consp cmpl) (cadr cmpl))))
     (funcall func trans sym)))
 
+(defun scheme-complete-variable-name (trans sym)
+  (dabbrev-expand))
+
 (defun scheme-smart-complete (&optional arg)
   (interactive "P")
   (if scheme-indent-before-complete-p
@@ -4361,10 +4171,10 @@ at that location, and `beep' will just beep and do nothing."
   (let ((res (scheme-get-base-completions arg)))
     (cons (car res)
           (cons (mapcar #'(lambda (x)
-                           (cond
-                            ((symbolp x) (list (symbol-name x)))
-                            ((stringp x) (list x))
-                            (t x)))
+                            (cond
+                             ((symbolp x) (list (symbol-name x)))
+                             ((stringp x) (list x))
+                             (t x)))
                         (cadr res))
                 (cddr res)))))
 
@@ -4400,10 +4210,8 @@ at that location, and `beep' will just beep and do nothing."
              (completer (or (scheme-string-completer param-type)
                             '(scheme-complete-file-name
                               file-name-nondirectory))))
-        (list
-         ;;(if (consp completer) (funcall (cadr completer) sym) sym)
-         sym
-         (scheme-apply-string-completer completer sym))))
+        (list sym
+              (scheme-apply-string-completer completer sym))))
      ;; outer special
      ((and (consp outer-type)
            (eq 'special (car outer-type))
@@ -4474,7 +4282,7 @@ at that location, and `beep' will just beep and do nothing."
                                      (eq 'set (car param-type)))
                                 (scheme-translate-type (cadr param-type))
                               'integer)
-                            param-type))
+                          param-type))
              (base-completions
               (scheme-env-filter
                #'(lambda (x)
@@ -4511,9 +4319,11 @@ at that location, and `beep' will just beep and do nothing."
          (func
           (if (or (and (not (bobp))
                        (eq ?w (char-syntax (char-before))))
-                  (and (save-excursion
-                         (beginning-of-line)
-                         (re-search-forward "\\S-" end t))
+                  (and (not (and (looking-at "\\s-*$")
+                                 (looking-back ")")))
+                       (save-excursion
+                            (beginning-of-line)
+                            (re-search-forward "\\S-" end t))
                        (case scheme-complete-empty-tab-behavior
                          ((indent) nil)
                          ((beep) (beep))
@@ -4542,7 +4352,7 @@ at that location, and `beep' will just beep and do nothing."
               (progn (goto-char calculate-lisp-indent-last-sexp)
                      (beginning-of-line)
                      (parse-partial-sexp (point)
-					 calculate-lisp-indent-last-sexp 0 t)))
+                                         calculate-lisp-indent-last-sexp 0 t)))
           ;; Indent under the list or under the first sexp on the same
           ;; line as calculate-lisp-indent-last-sexp.  Note that first
           ;; thing on that line has to be complete sexp since we are
@@ -4555,15 +4365,15 @@ at that location, and `beep' will just beep and do nothing."
              (function-sym (intern-soft function))
              (method (and (not (assq function-sym (scheme-current-local-vars)))
                           (get function-sym 'scheme-indent-function))))
-	(cond ((or (eq method 'defun)
-		   (and (null method)
-			(> (length function) 3)
-			(string-match "\\`def" function)))
-	       (lisp-indent-defform state indent-point))
-	      ((integerp method)
-	       (lisp-indent-specform method state
-				     indent-point normal-indent))
-	      (method
+        (cond ((or (eq method 'defun)
+                   (and (null method)
+                        (> (length function) 3)
+                        (string-match "\\`def" function)))
+               (lisp-indent-defform state indent-point))
+              ((integerp method)
+               (lisp-indent-specform method state
+                                     indent-point normal-indent))
+              (method
                (funcall method state indent-point normal-indent)))))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;

@@ -60,6 +60,7 @@
 ;;; That's all there is to it.
 
 ;;; History:
+;;;  0.9.1: 2016/04/08 - fixing bug in cond-expand parsing
 ;;;  0.9.0: 2015/12/23 - R7RS support
 ;;; 0.8.11: 2013/02/20 - formatting for melpa packaging
 ;;; 0.8.10: 2010/01/31 - factoring out a `scheme-get-completions' utility
@@ -2843,8 +2844,7 @@ at that location, and `beep' will just beep and do nothing."
 ;; visit a file and kill the buffer only if it wasn't already open
 (defmacro scheme-with-find-file (path-expr &rest body)
   (let ((path (gensym "path"))
-        (buf (gensym "buf"))
-        (res (gensym "res")))
+        (buf (gensym "buf")))
     `(save-window-excursion
        (let* ((,path (file-truename ,path-expr))
               (,buf (find-if
@@ -2854,12 +2854,11 @@ at that location, and `beep' will just beep and do nothing."
                                 (equal ,path (file-truename buf-file)))))
                      (buffer-list))))
          (set-buffer (or ,buf (find-file-noselect ,path t)))
-         (let ((,res (ignore-errors
-                       (save-excursion
-                         (goto-char (point-min))
-                         ,@body))))
-           (unless ,buf (kill-buffer (current-buffer)))
-           ,res)))))
+         (unwind-protect
+             (save-excursion
+               (goto-char (point-min))
+               ,@body)
+           (unless ,buf (kill-buffer (current-buffer))))))))
 
 (defun scheme-directory-tree-files (init-dir &optional full match)
   (let ((res '())
@@ -3821,8 +3820,8 @@ at that location, and `beep' will just beep and do nothing."
        `((,file ,@(car res)) ,(cadr res))))
     ((cond-expand)
      (let ((x
-            (map
-             #'(lambda (clause) (scheme-library-decl-includes (cadr clause)))
+            (mapcar
+             #'(lambda (clause) (scheme-library-decl-includes (cadr clause) base))
              (cdr decl))))
        (list (scheme-append-map #'car x)
              (scheme-append-map #'cadr x))))

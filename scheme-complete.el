@@ -1,7 +1,7 @@
 ;;; scheme-complete.el --- Smart tab completion for Scheme in Emacs
 
 ;;; Author: Alex Shinn
-;;; Version: 0.9.0
+;;; Version: 0.9.2
 
 ;;; This code is written by Alex Shinn and placed in the Public
 ;;; Domain.  All warranties are disclaimed.
@@ -60,6 +60,7 @@
 ;;; That's all there is to it.
 
 ;;; History:
+;;;  0.9.2: 2016/05/03 - several bugfixes
 ;;;  0.9.1: 2016/04/08 - fixing bug in cond-expand parsing
 ;;;  0.9.0: 2015/12/23 - R7RS support
 ;;; 0.8.11: 2013/02/20 - formatting for melpa packaging
@@ -129,6 +130,8 @@
     ("gosh" . gauche)
     ("gsi"  . gambit)
     ))
+
+(defvar in-mod-p nil)
 
 (defgroup scheme-complete nil
   "Smart tab completion"
@@ -1631,6 +1634,11 @@ at that location, and `beep' will just beep and do nothing."
      (bytevector-length (lambda (bytevector) n))
      (string-cursor-ref (lambda (string i) char))
      (string-cursor-set! (lambda (string i char)))
+     (string-cursor-start (lambda (string) i))
+     (string-cursor-end (lambda (string) i))
+     (string-cursor->index (lambda (string i) i))
+     (string-index->cursor (lambda (string i) i))
+     (string-cursor-offset (lambda (string i) i))
      (string-cursor-next (lambda (string i) i))
      (string-cursor-prev (lambda (string i) i))
      (string-size (lambda (string) i))
@@ -2543,13 +2551,14 @@ at that location, and `beep' will just beep and do nothing."
     (gauche   . scheme-module-exports/gauche)))
 
 (defun scheme-fixup-path (path)
-  (delete-duplicates
-   (remove-if-not #'(lambda (dir)
-                      (and (stringp dir)
-                           (not (equal dir ""))
-                           (or (string-prefix-p "./" dir)
-                                  (file-directory-p dir))))
-                  path)))
+  (and (consp path)
+       (delete-duplicates
+        (remove-if-not #'(lambda (dir)
+                           (and (stringp dir)
+                                (not (equal dir ""))
+                                (or (string-prefix-p "./" dir)
+                                    (file-directory-p dir))))
+                       path))))
 
 (defvar *scheme-chibi-repo-path* 'compute-me-later)
 (defvar *scheme-chicken-repo-path* 'compute-me-later)
@@ -2595,12 +2604,33 @@ at that location, and `beep' will just beep and do nothing."
              *scheme-gauche-repo-path*))
     (t '())))
 
+(defun scheme-library-root (base)
+  "The root library dir for `base'."
+  (scheme-with-find-file base
+    (re-search-forward "^(define-library\\s-")
+    (let ((name (reverse (scheme-nth-sexp-at-point 0)))
+          (dir base))
+      (while (and (consp name)
+                  (string-match (concat (scheme-sexp-to-string (car name))
+                                        "\\(/+\\|\\.sld\\)?")
+                                dir))
+        (setq name (cdr name))
+        (setq dir
+              (replace-regexp-in-string "/+$" "" (file-name-directory dir))))
+      (and (null name) dir))))
+
+(defun scheme-guess-containing-library-path (impl)
+  (let* ((lang+base (scheme-code-context (buffer-file-name (current-buffer))))
+         (dir (and (eq 'r7rs (car lang+base))
+                   (cadr lang+base)
+                   (scheme-library-root (cadr lang+base)))))
+    (if dir (list dir) (list "." "./lib"))))
+
 (defun scheme-r7rs-library-path (impl)
   (scheme-fixup-path
-   (append (and (symbolp impl)
-                (list "."
-                      "./lib"
-                      (concat "/usr/local/share/snow/" (symbol-name impl))))
+   (append (scheme-guess-containing-library-path impl)
+           (and (symbolp impl)
+                (list (concat "/usr/local/share/snow/" (symbol-name impl))))
            ;; default to chibi since it installs source
            (scheme-library-path
             (if (or (not impl) (eq 'r7rs impl))
@@ -2610,60 +2640,69 @@ at that location, and `beep' will just beep and do nothing."
 (defvar *scheme-complete-module-cache* '()
   "Cache of module exports.")
 
+(defun scheme-complete-clear-cache ()
+  "Clear all scheme-complete caches."
+  (interactive)
+  (setq *scheme-imported-modules* '())
+  (setq *scheme-complete-module-cache* '()))
+
 (defun scheme-module-exports (mod)
   (unless (member mod *scheme-imported-modules*)
     (push mod *scheme-imported-modules*)
-    (cond
-     ((and (consp mod) (eq 'srfi (car mod)))
-      (scheme-append-map #'scheme-srfi-exports (cdr mod)))
-     ((and (symbolp mod) (string-match "^srfi-" (symbol-name mod)))
-      (scheme-srfi-exports
-       (string-to-number (substring (symbol-name mod) 5))))
-     ((equal '(scheme r5rs) mod)
-      (scheme-r5rs-info))
-     ((equal '(chibi) mod)
-      (append (scheme-r5rs-info)
-              (cdr (assq (car mod) *scheme-implementation-exports*))))
-     ((and (consp mod) (eq 'scheme (car mod))
-           (cdr (assoc mod *scheme-r7rs-info*))))
-     ((and (consp mod) (null (cdr mod))
-           (cdr (assq (car mod) *scheme-implementation-exports*))))
-     ((and (symbolp mod)
-           (cdr (assq mod *scheme-implementation-exports*))))
-     (t
-      (let ((cached (assoc mod *scheme-complete-module-cache*)))
-        ;; remove stale caches
-        (when (and cached
-                   (stringp (cadr cached))
-                   (ignore-errors
-                     (let ((mtime (nth 5 (file-attributes (cadr cached))))
-                           (ptime (caddr cached)))
-                       (or (> (car mtime) (car ptime))
-                           (and (= (car mtime) (car ptime))
-                                (> (cadr mtime) (cadr ptime)))))))
-          (setq *scheme-complete-module-cache*
-                (scheme-assoc-delete-all mod *scheme-complete-module-cache*))
-          (setq cached nil))
-        (if cached
-            (cadddr cached)
-          ;; (re)compute module exports
-          (let ((export-fun
-                 (if (consp mod)
-                     #'scheme-module-exports/r7rs
-                   (or scheme-module-exports-function
-                       (cdr (assq (scheme-current-implementation)
-                                  *scheme-module-exports-functions*))
-                       #'scheme-module-exports/r7rs))))
-            (when export-fun
-              (let ((res (funcall export-fun mod)))
-                (when res
-                  (when (and scheme-complete-cache-p (car res))
-                    (push (list mod
-                                (car res)
-                                (nth 5 (file-attributes (car res)))
-                                (cadr res))
-                          *scheme-complete-module-cache*))
-                  (cadr res)))))))))))
+    (scheme-module-exports/compute mod)))
+
+(defun scheme-module-exports/compute (mod)
+  (cond
+   ((and (consp mod) (eq 'srfi (car mod)))
+    (scheme-append-map #'scheme-srfi-exports (cdr mod)))
+   ((and (symbolp mod) (string-match "^srfi-" (symbol-name mod)))
+    (scheme-srfi-exports
+     (string-to-number (substring (symbol-name mod) 5))))
+   ((equal '(scheme r5rs) mod)
+    (scheme-r5rs-info))
+   ((equal '(chibi) mod)
+    (append (scheme-r5rs-info)
+            (cdr (assq (car mod) *scheme-implementation-exports*))))
+   ((and (consp mod) (eq 'scheme (car mod))
+         (cdr (assoc mod *scheme-r7rs-info*))))
+   ((and (consp mod) (null (cdr mod))
+         (cdr (assq (car mod) *scheme-implementation-exports*))))
+   ((and (symbolp mod)
+         (cdr (assq mod *scheme-implementation-exports*))))
+   (t
+    (let ((cached (assoc mod *scheme-complete-module-cache*)))
+      ;; remove stale caches
+      (when (and cached
+                 (stringp (cadr cached))
+                 (ignore-errors
+                   (let ((mtime (nth 5 (file-attributes (cadr cached))))
+                         (ptime (caddr cached)))
+                     (or (> (car mtime) (car ptime))
+                         (and (= (car mtime) (car ptime))
+                              (> (cadr mtime) (cadr ptime)))))))
+        (setq *scheme-complete-module-cache*
+              (scheme-assoc-delete-all mod *scheme-complete-module-cache*))
+        (setq cached nil))
+      (if cached
+          (cadddr cached)
+        ;; (re)compute module exports
+        (let ((export-fun
+               (if (consp mod)
+                   #'scheme-module-exports/r7rs
+                 (or scheme-module-exports-function
+                     (cdr (assq (scheme-current-implementation)
+                                *scheme-module-exports-functions*))
+                     #'scheme-module-exports/r7rs))))
+          (when export-fun
+            (let ((res (funcall export-fun mod)))
+              (when res
+                (when (and scheme-complete-cache-p (car res))
+                  (push (list mod
+                              (car res)
+                              (nth 5 (file-attributes (car res)))
+                              (cadr res))
+                        *scheme-complete-module-cache*))
+                (cadr res))))))))))
 
 (defun scheme-module-exports/r7rs (mod)
   (let* ((file (concat (if (symbolp mod)
@@ -2825,10 +2864,11 @@ at that location, and `beep' will just beep and do nothing."
 (defun scheme-beginning-of-sexp ()
   (ignore-errors
     (let ((syn (char-syntax (char-before (point)))))
-     (if (or (eq syn ?\()
-             (and (eq syn ?\") (scheme-in-string-p)))
-         (forward-char -1)
-       (forward-sexp -1)))))
+      (if (or (eq syn ?\()
+              (and (eq syn ?\") (scheme-in-string-p)))
+          (forward-char -1)
+        (forward-sexp -1))
+      t)))
 
 (defun scheme-shell-command-to-line (cmd)
   (and (fboundp 'shell-command-to-string)
@@ -3165,8 +3205,7 @@ at that location, and `beep' will just beep and do nothing."
         (or (ignore-errors
               (progn
                 (skip-chars-backward " \t\n" limit)
-                (scheme-beginning-of-sexp)
-                t))
+                (scheme-beginning-of-sexp)))
             (goto-char limit))
         (when (and (> (point) (point-min))
                    (eq ?\( (char-syntax (char-before (point))))
@@ -3551,6 +3590,7 @@ at that location, and `beep' will just beep and do nothing."
     defs))
 
 (defun scheme-current-exports ()
+  "Returns a list of all symbols exported in the current file"
   (let ((res '())
         (in-mod-p nil))
     (save-excursion
@@ -3593,12 +3633,13 @@ at that location, and `beep' will just beep and do nothing."
     res))
 
 (defun scheme-current-exports/typed ()
+  "Returns an alist of (symbols . type) for all current exports"
   (let* ((exports (scheme-current-exports))
          (imports (and scheme-complete-recursive-inference-p
                        (ignore-errors (scheme-current-imports))))
          (globals (ignore-errors (scheme-current-globals (list imports))))
          (env (append imports globals)))
-    (message "exports: %s" exports)
+    ;;(message "exports: %s" exports)
     (if exports
         (remove-if-not #'(lambda (x) (memq (car x) exports)) env)
       env)))
@@ -4136,7 +4177,7 @@ at that location, and `beep' will just beep and do nothing."
     (funcall func trans sym)))
 
 (defun scheme-complete-variable-name (trans sym)
-  (dabbrev-expand))
+  (dabbrev-expand nil))
 
 (defun scheme-smart-complete (&optional arg)
   (interactive "P")

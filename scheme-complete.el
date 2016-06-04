@@ -1,7 +1,7 @@
 ;;; scheme-complete.el --- Smart tab completion for Scheme in Emacs
 
 ;;; Author: Alex Shinn
-;;; Version: 0.9.2
+;;; Version: 0.9.3
 
 ;;; This code is written by Alex Shinn and placed in the Public
 ;;; Domain.  All warranties are disclaimed.
@@ -60,6 +60,8 @@
 ;;; That's all there is to it.
 
 ;;; History:
+;;;  0.9.3: 2016/06/04 - string-cursors, bugfixes, speedups, introducing
+;;:                      unit tests with ert
 ;;;  0.9.2: 2016/05/03 - several bugfixes
 ;;;  0.9.1: 2016/04/08 - fixing bug in cond-expand parsing
 ;;;  0.9.0: 2015/12/23 - R7RS support
@@ -202,6 +204,11 @@ at that location, and `beep' will just beep and do nothing."
 (defcustom *scheme-use-r7rs* t
   "Set to nil to restore legacy behavior."
   :type 'boolean
+  :group 'scheme-complete)
+
+(defcustom *scheme-default-library-path* nil
+  "Library path to search for modules. Inferred (possibly slowly) if not set."
+  :type '(repeat file)
   :group 'scheme-complete)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -1619,6 +1626,74 @@ at that location, and `beep' will just beep and do nothing."
    ("Octet-Addressed Binary Blocks"
     )
 
+   () () () () ()                 ; 75-79
+   () () () () () () () () () ()  ; 80-89
+   () () () () () () () () () ()  ; 90-99
+   () () () () () () () () () ()  ; 100-109
+   () () () () () () () () () ()  ; 110-119
+   () () () () () () () () () ()  ; 120-129
+
+   ;; SRFI 130
+   ("Cursor-based string library"
+    (string-cursor-ref (lambda (string string-cursor) char))
+    (string-cursor-set! (lambda (string string-cursor char)))
+    (string-cursor-start (lambda (string) string-cursor))
+    (string-cursor-end (lambda (string) string-cursor))
+    (string-cursor->index (lambda (string string-cursor) i))
+    (string-index->cursor (lambda (string i) string-cursor))
+    (string-cursor-next (lambda (string string-cursor) string-cursor))
+    (string-cursor-prev (lambda (string string-cursor) string-cursor))
+    (string-cursor-forward (lambda (string string-cursor i) string-cursor))
+    (string-cursor-back (lambda (string string-cursor i) string-cursor))
+    (string-cursor<? (lambda (string-cursor1 string-cursor2) boolean))
+    (string-cursor>? (lambda (string-cursor1 string-cursor2) boolean))
+    (string-cursor<=? (lambda (string-cursor1 string-cursor2) boolean))
+    (string-cursor>=? (lambda (string-cursor1 string-cursor2) boolean))
+    (string-cursor=? (lambda (string-cursor1 string-cursor2) boolean))
+    (string-cursor-diff (lambda (string string-cursor1 string-cursor2) i))
+    (string-fold (lambda (kons knil str :optional start end) obj))
+    (string-fold-right (lambda (kons knil str :optional start end) obj))
+    (string-tabulate (lambda (proc len) str))
+    (string-for-each-cursor (lambda (proc str :optional start-indexer end-indexer) undefined))
+    (string-every (lambda (pred str :optional start end) obj))
+    (string-any (lambda (pred str :optional start end) obj))
+    (string-ref/cursor  (lambda (str string-indexer) char))
+    (string->list/cursors (lambda (str :optional start-indexer end-indexer) ls))
+    (string->vector/cursors (lambda (str :optional start-indexer end-indexer) vector))
+    (substring/cursors (lambda (str start-indexer :optional end-indexer) str))
+    (string-copy/cursors (lambda (str :optional start-indexer end-indexer) str))
+    (reverse-list->string (lambda (ls) str))
+    (string-take (lambda (string nchars) str))
+    (string-drop (lambda (string nchars) str))
+    (string-take-right (lambda (string nchars) str))
+    (string-drop-right (lambda (string nchars) str))
+    (string-pad (lambda (string k :optional char start-indexer end-indexer) str))
+    (string-pad-right (lambda (string k :optional char start-indexer end-indexer) str))
+    (string-trim (lambda (string :optional pred start-indexer end-indexer) str))
+    (string-trim-right (lambda (string :optional pred start-indexer end-indexer) str))
+    (string-trim-both (lambda (string :optional pred start-indexer end-indexer) str))
+    (string-filter (lambda (pred string :optional start-indexer end-indexer) str))
+    (string-remove (lambda (pred string :optional start-indexer end-indexer) str))
+    (string-index (lambda (string pred :optional start-indexer end-indexer) (or string-cursor bool)))
+    (string-index-right (lambda (string pred :optional end-indexer start-indexer) (or string-cursor bool)))
+    (string-skip (lambda (string pred :optional start-indexer end-indexer) (or string-cursor bool)))
+    (string-skip-right (lambda (string pred :optional end-indexer start-indexer) (or string-cursor bool)))
+    (string-count (lambda (string pred :optional start-indexer end-indexer) n))
+    (string-prefix-length (lambda (string1 string2 :optional start-indexer1 end-indexer1 start-indexer2 end-indexer2) n))
+    (string-suffix-length (lambda (string1 string2 :optional start-indexer1 end-indexer1 start-indexer2 end-indexer2) n))
+    (string-prefix? (lambda (string1 string2 :optional start-indexer1 end-indexer1 start-indexer2 end-indexer2) bool))
+    (string-suffix? (lambda (string1 string2 :optional start-indexer1 end-indexer1 start-indexer2 end-indexer2) bool))
+    (string-contains (lambda (string pattern :optional s-start s-end p-start p-end) obj))
+    (string-reverse (lambda (str :optional start end) str))
+    (string-concatenate (lambda (string-list) str))
+    (string-concatenate-reverse (lambda (string-list :optional final-string end) str))
+    (string-replicate (lambda (str from :optional to start end) str))
+    (string-null? (lambda (str) bool))
+    (string-join (lambda (string-list :optional delim grammar) str))
+    (string-split (lambda (string :optional token-chars start end) str))
+    (string-replace (lambda (str1 str2 start1 end1 :optional start2 end2) str))
+    )
+
    ])
 
 ;; another big table - consider moving to a separate file
@@ -1632,15 +1707,20 @@ at that location, and `beep' will just beep and do nothing."
      (bytevector-u8-ref (lambda (bytevector i) n))
      (bytevector-u8-set! (lambda (bytevector i n)))
      (bytevector-length (lambda (bytevector) n))
-     (string-cursor-ref (lambda (string i) char))
-     (string-cursor-set! (lambda (string i char)))
-     (string-cursor-start (lambda (string) i))
-     (string-cursor-end (lambda (string) i))
-     (string-cursor->index (lambda (string i) i))
-     (string-index->cursor (lambda (string i) i))
-     (string-cursor-offset (lambda (string i) i))
-     (string-cursor-next (lambda (string i) i))
-     (string-cursor-prev (lambda (string i) i))
+     (string-cursor-ref (lambda (string string-cursor) char))
+     (string-cursor-set! (lambda (string string-cursor char)))
+     (string-cursor-start (lambda (string) string-cursor))
+     (string-cursor-end (lambda (string) string-cursor))
+     (string-cursor->index (lambda (string string-cursor) i))
+     (string-index->cursor (lambda (string i) string-cursor))
+     (string-cursor-offset (lambda (string string-cursor) i))
+     (string-cursor-next (lambda (string string-cursor) string-cursor))
+     (string-cursor-prev (lambda (string string-cursor) string-cursor))
+     (string-cursor<? (lambda (string-cursor1 string-cursor2) boolean))
+     (string-cursor>? (lambda (string-cursor1 string-cursor2) boolean))
+     (string-cursor<=? (lambda (string-cursor1 string-cursor2) boolean))
+     (string-cursor>=? (lambda (string-cursor1 string-cursor2) boolean))
+     (string-cursor=? (lambda (string-cursor1 string-cursor2) boolean))
      (string-size (lambda (string) i))
      (make-exception (lambda (symbol string list proc source) exception))
      (exception-kind (lambda (exception) symbol))
@@ -1698,7 +1778,7 @@ at that location, and `beep' will just beep and do nothing."
      (exact-sqrt (lambda (i) i))
      (string-index->offset (lambda (string i) i))
      (string-offset->index (lambda (string i) i))
-     (substring-cursor (lambda (string start :optional end) string))
+     (substring-cursor (lambda (string start-indexer :optional end-indexer) string))
      (subbytes (lambda (bytevector start :optional end) bytevector))
      (port-fold-case? (lambda (port) boolean))
      (set-port-fold-case! (lambda (port boolean)))
@@ -2607,7 +2687,7 @@ at that location, and `beep' will just beep and do nothing."
 (defun scheme-library-root (base)
   "The root library dir for `base'."
   (scheme-with-find-file base
-    (re-search-forward "^(define-library\\s-")
+    (re-search-forward "^(define-library\\s-" nil t)
     (let ((name (reverse (scheme-nth-sexp-at-point 0)))
           (dir base))
       (while (and (consp name)
@@ -2620,11 +2700,13 @@ at that location, and `beep' will just beep and do nothing."
       (and (null name) dir))))
 
 (defun scheme-guess-containing-library-path (impl)
-  (let* ((lang+base (scheme-code-context (buffer-file-name (current-buffer))))
-         (dir (and (eq 'r7rs (car lang+base))
-                   (cadr lang+base)
-                   (scheme-library-root (cadr lang+base)))))
-    (if dir (list dir) (list "." "./lib"))))
+  (or *scheme-default-library-path*
+      (let* ((lang+base
+              (scheme-code-context (buffer-file-name (current-buffer))))
+             (dir (and (memq (car lang+base) '(r7rs r7rs-library-declaration))
+                       (cadr lang+base)
+                       (scheme-library-root (cadr lang+base)))))
+        (if dir (list dir) (list "." "./lib")))))
 
 (defun scheme-r7rs-library-path (impl)
   (scheme-fixup-path
@@ -2789,22 +2871,28 @@ at that location, and `beep' will just beep and do nothing."
        #'(lambda (dir)
            (let ((len (length dir)))
              (mapcar #'(lambda (f) (substring f (+ 1 len)))
-                     (scheme-directory-tree-files dir t "\\.scm\\'"))))
+                     (scheme-directory-tree-files dir t "\\.scm\\'" 2))))
        path)))))
 
 (defun scheme-r7rs-available-modules (&optional impl)
   (let ((path (scheme-r7rs-library-path
                (or impl (scheme-current-implementation)))))
-    (mapcar
-     #'(lambda (f) (split-string f "/+" t))
+    (append
+     '(("scheme" "base") ("scheme" "case-lambda") ("scheme char")
+       ("scheme" "complex") ("scheme" "cxr") ("scheme" "eval")
+       ("scheme" "file") ("scheme" "inexact") ("scheme" "lazy")
+       ("scheme" "load") ("scheme" "process-context") ("scheme" "r5rs")
+       ("scheme" "read") ("scheme" "repl") ("scheme" "time") ("scheme" "write"))
      (mapcar
-      #'file-name-sans-extension
-      (scheme-append-map
-       #'(lambda (dir)
-           (let ((len (length dir)))
-             (mapcar #'(lambda (f) (substring f (+ 1 len)))
-                     (scheme-directory-tree-files dir t "\\.sld\\'"))))
-       path)))))
+      #'(lambda (f) (split-string f "/+" t))
+      (mapcar
+       #'file-name-sans-extension
+       (scheme-append-map
+        #'(lambda (dir)
+            (let ((len (length dir)))
+              (mapcar #'(lambda (f) (substring f (+ 1 len)))
+                      (scheme-directory-tree-files dir t "\\.sld\\'" 2))))
+        path))))))
 
 (defun scheme-available-modules (&optional impl)
   (case impl
@@ -2900,22 +2988,30 @@ at that location, and `beep' will just beep and do nothing."
                ,@body)
            (unless ,buf (kill-buffer (current-buffer))))))))
 
-(defun scheme-directory-tree-files (init-dir &optional full match)
+(defun scheme-directory-tree-files (init-dir &optional full match maxdepth)
   (let ((res '())
-        (stack (if (file-directory-p init-dir) (list init-dir) '())))
+        (stack
+         (list (cons 0 (if (file-directory-p init-dir) (list init-dir) '())))))
     (while (consp stack)
-      (let* ((dir (pop stack))
-             (files (remove-if #'(lambda (f) (or (equal f ".") (equal f "..")))
-                               (directory-files dir)))
-             (full-files (mapcar #'(lambda (f) (concat dir "/" f)) files)))
-        (setq res (append (if match
+      (let* ((x (pop stack))
+             (depth (car x))
+             (dirs (cdr x)))
+        (setq depth (car x))
+        (while (consp dirs)
+          (let* ((dir (pop dirs))
+                 (files (remove-if #'(lambda (f) (string-prefix-p "." f))
+                                   (directory-files dir)))
+                 (full-files (mapcar #'(lambda (f) (concat dir "/" f)) files))
+                 (matches (if match
                               (remove-if-not
                                #'(lambda (f) (string-match match f))
                                (if full full-files files))
-                            (if full full-files files))
-                          res))
-        (setq stack
-              (append (remove-if-not #'file-directory-p full-files) stack))))
+                            (if full full-files files))))
+            (setq res (append matches res))
+            (when (or (not maxdepth) (consp matches) (< depth maxdepth))
+              (push (cons (+ depth 1)
+                          (remove-if-not #'file-directory-p full-files))
+                    stack))))))
     res))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -3038,7 +3134,7 @@ at that location, and `beep' will just beep and do nothing."
   (case (and (not (eobp)) (char-syntax (char-after)))
     ((?\()
      (forward-char 1)
-     (if (eq ?w (char-syntax (char-after)))
+     (if (memq (char-syntax (char-after)) '(?w ?_))
          (let ((op (scheme-symbol-at-point)))
            (cond
             ((eq op 'lambda)
@@ -3664,6 +3760,10 @@ at that location, and `beep' will just beep and do nothing."
       ((i j k n m int index size count len length bound nchars start end
         pid uid gid fd fileno errno u8 byte)
        'integer)
+      ((scur string-cursor)
+       'string-cursor)
+      ((start-indexer end-indexer)
+       '(or integer string-cursor))
       ((ch) 'char)
       ((str name pattern) 'string)
       ((file path pathname) 'filename)
@@ -3701,14 +3801,13 @@ at that location, and `beep' will just beep and do nothing."
                  'object)))))))))
 
 (defun scheme-lookup-type (spec pos)
+  "Resolve the type for `pos' the given param list `spec', handling :optional"
   (let ((i 1)
         (type nil))
     (while (and (consp spec) (<= i pos))
       (cond
        ((eq :optional (car spec))
-        (if (and (= i pos) (consp (cdr spec)))
-            (setq type (cadr spec)))
-        (setq i (+ pos 1)))
+        (decf i))
        ((= i pos)
         (setq type (car spec))
         (setq spec nil))
@@ -3875,7 +3974,7 @@ at that location, and `beep' will just beep and do nothing."
     (scheme-with-find-file base
       (let ((limit (point-max)))
         (when (not flatp)
-          (re-search-forward "^(define-library\\s-")
+          (re-search-forward "^(define-library\\s-" nil t)
           (forward-sexp 1))
         (while (< (point) limit)
           (let* ((decl (scheme-nth-sexp-at-point 0))
@@ -3950,42 +4049,54 @@ at that location, and `beep' will just beep and do nothing."
          (base (cadr lang+base)))
     ;; base language
     (case lang
-     ((r7rs-library-declaration)
-      (let ((enclosing (scheme-enclosing-2-sexp-prefixes)))
-        (cond
-         ((eq 'import (caddr enclosing))
-          (list (mapcar #'list
-                        (mapcar #'intern
-                                (scheme-library-completions
-                                 (scheme-preceding-sexps))))))
-         ((eq 'import (car enclosing)) nil)
-         (t (list *scheme-r7rs-lib-decl-info*)))))
-     ((r5rs)
-      (let* ((env (if base
-                      '(((import
-                          (special list scheme-available-modules))))
-                    (list (scheme-r5rs-info))))
-             (base (cdr (assq (scheme-current-implementation)
-                              *scheme-implementation-exports*))))
-        (if (and base (not in-mod-p)) (push base env))
-        env))
-     (t ; r7rs
-      (let ((env '()))
-        ;; imports
-        (let ((imports (ignore-errors (scheme-file-imports (or base file)))))
-          (if imports (push imports env)))
-        ;; top-level defs
-        (let ((top (ignore-errors (scheme-current-globals))))
-          (if top (push top env)))
-        ;; current local vars
-        (let ((locals (ignore-errors (scheme-current-local-vars env))))
-          (if locals (push locals env)))
-        ;; define-library/import
-        (unless env
-          (push '((define-library (syntax clause))) env))
-        (unless (scheme-inside-define*-p)
-          (push '((import (special list scheme-available-modules))) env))
-        env)))))
+      ((r7rs-library-declaration)
+       (let ((enclosing (scheme-enclosing-2-sexp-prefixes)))
+         (cond
+          ((eq 'import (caddr enclosing))
+           (list (mapcar #'list
+                         (mapcar #'intern
+                                 (scheme-library-completions
+                                  (scheme-preceding-sexps))))))
+          ((eq 'import (car enclosing)) nil)
+          (t (list *scheme-r7rs-lib-decl-info*)))))
+      ((r5rs)
+       (let* ((env (if base
+                       '(((import
+                           (special list scheme-available-modules))))
+                     (list (scheme-r5rs-info))))
+              (base (cdr (assq (scheme-current-implementation)
+                               *scheme-implementation-exports*))))
+         (if (and base (not in-mod-p)) (push base env))
+         env))
+      (t ; r7rs
+       (let* ((env '())
+              (can-import-p (not (scheme-inside-define*-p)))
+              (in-import-p
+               (and can-import-p
+                    (eq 'import (caddr (scheme-enclosing-2-sexp-prefixes))))))
+         (cond
+          (in-import-p
+           (push (mapcar #'list
+                         (mapcar #'intern
+                                 (scheme-library-completions
+                                  (scheme-preceding-sexps))))
+                 env))
+          (t
+           ;; imports
+           (let ((imports (ignore-errors (scheme-file-imports (or base file)))))
+             (if imports (push imports env)))
+           ;; top-level defs
+           (let ((top (ignore-errors (scheme-current-globals))))
+             (if top (push top env)))
+           ;; current local vars
+           (let ((locals (ignore-errors (scheme-current-local-vars env))))
+             (if locals (push locals env)))
+           ;; define-library/import
+           (unless env
+             (push '((define-library (syntax clause))) env))
+           (when can-import-p
+             (push '((import (special list scheme-available-modules))) env))))
+         env)))))
 
 (defun scheme-env-filter (pred env)
   (mapcar #'car

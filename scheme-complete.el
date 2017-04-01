@@ -1,7 +1,7 @@
 ;;; scheme-complete.el --- Smart tab completion for Scheme in Emacs
 
 ;;; Author: Alex Shinn
-;;; Version: 0.9.3
+;;; Version: 0.9.4
 
 ;;; This code is written by Alex Shinn and placed in the Public
 ;;; Domain.  All warranties are disclaimed.
@@ -60,6 +60,7 @@
 ;;; That's all there is to it.
 
 ;;; History:
+;;;  0.9.4: 2017/04/01 - don't open non-existant files
 ;;;  0.9.3: 2016/06/04 - string-cursors, bugfixes, speedups, introducing
 ;;:                      unit tests with ert
 ;;;  0.9.2: 2016/05/03 - several bugfixes
@@ -2614,6 +2615,30 @@ at that location, and `beep' will just beep and do nothing."
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; special lookups (TODO add more impls, try to abstract better)
 
+;; visit a file and kill the buffer only if it wasn't already open
+(defmacro scheme-with-find-file (path-expr &rest body)
+  (let ((path (gensym "path"))
+        (buf0 (gensym "buf"))
+        (buf (gensym "buf")))
+    `(save-window-excursion
+       (let* ((,path (file-truename ,path-expr))
+              (,buf0 (find-if
+                      #'(lambda (x)
+                          (let ((buf-file (buffer-file-name x)))
+                            (and buf-file
+                                 (equal ,path (file-truename buf-file)))))
+                      (buffer-list)))
+              (,buf (or ,buf0 (and (file-exists-p ,path)
+                                   (find-file-noselect ,path t)))))
+         (unless ,buf
+           (error "no such file" ,path))
+         (set-buffer ,buf)
+         (unwind-protect
+             (save-excursion
+               (goto-char (point-min))
+               ,@body)
+           (unless ,buf0 (kill-buffer (current-buffer))))))))
+
 (defun scheme-srfi-exports (i)
   (and (integerp i)
        (>= i 0)
@@ -2969,25 +2994,6 @@ at that location, and `beep' will just beep and do nothing."
         #'(lambda (dir) (file-exists-p (concat dir "/" file)))
         path)))
 
-;; visit a file and kill the buffer only if it wasn't already open
-(defmacro scheme-with-find-file (path-expr &rest body)
-  (let ((path (gensym "path"))
-        (buf (gensym "buf")))
-    `(save-window-excursion
-       (let* ((,path (file-truename ,path-expr))
-              (,buf (find-if
-                     #'(lambda (x)
-                         (let ((buf-file (buffer-file-name x)))
-                           (and buf-file
-                                (equal ,path (file-truename buf-file)))))
-                     (buffer-list))))
-         (set-buffer (or ,buf (find-file-noselect ,path t)))
-         (unwind-protect
-             (save-excursion
-               (goto-char (point-min))
-               ,@body)
-           (unless ,buf (kill-buffer (current-buffer))))))))
-
 (defun scheme-directory-tree-files (init-dir &optional full match maxdepth)
   (let ((res '())
         (stack
@@ -3017,14 +3023,20 @@ at that location, and `beep' will just beep and do nothing."
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; sexp manipulation
 
+(defun scheme-in-comment-p ()
+  (memq 'font-lock-comment-face (text-properties-at (point))))
+
 ;; returns current argument position within sexp
 (defun scheme-beginning-of-current-sexp-operator ()
-  (let ((pos 0))
-    (skip-syntax-backward "w_")
-    (while (and (not (bobp)) (not (eq ?\( (char-before))))
-      (scheme-beginning-of-sexp)
-      (incf pos))
-    pos))
+  (ignore-errors
+    (let ((pos 0))
+      (if (scheme-in-comment-p)
+          (comment-search-backward))
+      (skip-syntax-backward "w_")
+      (while (and (not (bobp)) (not (eq ?\( (char-before))))
+        (scheme-beginning-of-sexp)
+        (incf pos))
+      pos)))
 
 (defun scheme-beginning-of-next-sexp ()
   (forward-sexp 2)
@@ -3044,15 +3056,16 @@ at that location, and `beep' will just beep and do nothing."
 ;;       (cons (scheme-symbol-at-point) pos))))
 
 (defun scheme-enclosing-2-sexp-prefixes ()
-  (save-excursion
-    (let* ((pos1 (scheme-beginning-of-current-sexp-operator))
-           (sym1 (scheme-symbol-at-point)))
-      (backward-char)
-      (or
-       (ignore-errors
-         (let ((pos2 (scheme-beginning-of-current-sexp-operator)))
-           (list sym1 pos1 (scheme-symbol-at-point) pos2)))
-       (list sym1 pos1 nil 0)))))
+  (ignore-errors
+    (save-excursion
+     (let* ((pos1 (scheme-beginning-of-current-sexp-operator))
+            (sym1 (scheme-symbol-at-point)))
+       (backward-char)
+       (or
+        (ignore-errors
+          (let ((pos2 (scheme-beginning-of-current-sexp-operator)))
+            (list sym1 pos1 (scheme-symbol-at-point) pos2)))
+        (list sym1 pos1 nil 0))))))
 
 (defun scheme-preceding-sexps ()
   (save-excursion
@@ -3971,18 +3984,19 @@ at that location, and `beep' will just beep and do nothing."
 (defun scheme-library-includes (base &optional flatp)
   (let ((decls '())
         (files '()))
-    (scheme-with-find-file base
-      (let ((limit (point-max)))
-        (when (not flatp)
-          (re-search-forward "^(define-library\\s-" nil t)
-          (forward-sexp 1))
-        (while (< (point) limit)
-          (let* ((decl (scheme-nth-sexp-at-point 0))
-                 (includes (and decl (scheme-library-decl-includes decl base))))
-            (when includes
-              (setq decls (append decls (car includes)))
-              (setq files (append files (cadr includes))))
-            (scheme-goto-next-top-level (not flatp))))))
+    (when (file-exists-p base)
+      (scheme-with-find-file base
+        (let ((limit (point-max)))
+          (when (not flatp)
+            (re-search-forward "^(define-library\\s-" nil t)
+            (forward-sexp 1))
+          (while (< (point) limit)
+            (let* ((decl (scheme-nth-sexp-at-point 0))
+                   (includes (and decl (scheme-library-decl-includes decl base))))
+              (when includes
+                (setq decls (append decls (car includes)))
+                (setq files (append files (cadr includes))))
+              (scheme-goto-next-top-level (not flatp)))))))
     (list decls files)))
 
 (defun scheme-library-include-type (base file)
@@ -4021,7 +4035,7 @@ at that location, and `beep' will just beep and do nothing."
   (let* ((sld (concat (file-name-sans-extension file)
                       *scheme-r7rs-extension*))
          (include-type (scheme-library-include-type sld file)))
-    (unless include-type
+    (unless (or include-type (equalp file sld))
       (let ((dir (file-name-directory file))
             (count 0)
             (sld-pat

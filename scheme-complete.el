@@ -2760,8 +2760,9 @@ at that location, and `beep' will just beep and do nothing."
 
 (defun scheme-module-exports/compute (mod)
   (cond
-   ((and (consp mod) (eq 'srfi (car mod)))
-    (scheme-append-map #'scheme-srfi-exports (cdr mod)))
+   ((and (consp mod) (eq 'srfi (car mod)) (integerp (cadr mod))
+         (scheme-srfi-exports (cadr mod)))
+    )
    ((and (symbolp mod) (string-match "^srfi-" (symbol-name mod)))
     (scheme-srfi-exports
      (string-to-number (substring (symbol-name mod) 5))))
@@ -2822,6 +2823,7 @@ at that location, and `beep' will just beep and do nothing."
                        *scheme-r7rs-extension*))
          (path (scheme-r7rs-library-path (scheme-current-implementation)))
          (dir (scheme-find-file-in-path file path)))
+    ;;(message "mod: %s file: %s path: %s dir: %s" mod file path dir)
     (when dir
       (list (concat dir "/" file)
             (scheme-with-find-file (concat dir "/" file)
@@ -3747,11 +3749,16 @@ at that location, and `beep' will just beep and do nothing."
          (imports (and scheme-complete-recursive-inference-p
                        (ignore-errors (scheme-current-imports))))
          (globals (ignore-errors (scheme-current-globals (list imports))))
-         (env (append imports globals)))
+         (env (append imports globals))
+         (typed-exports
+          (if exports
+              (remove-if-not #'(lambda (x) (memq (car x) exports)) env)
+            env))
+         (undefined-exports
+          (remove-if #'(lambda (x) (assq x typed-exports)) exports)))
     ;;(message "exports: %s" exports)
-    (if exports
-        (remove-if-not #'(lambda (x) (memq (car x) exports)) env)
-      env)))
+    (append typed-exports
+            (mapcar #'(lambda (x) (list x 'object)) undefined-exports))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; This is rather complicated because we want to auto-generate

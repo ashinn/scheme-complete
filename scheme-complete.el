@@ -2751,7 +2751,8 @@ at that location, and `beep' will just beep and do nothing."
   "Clear all scheme-complete caches."
   (interactive)
   (setq *scheme-imported-modules* '())
-  (setq *scheme-complete-module-cache* '()))
+  (setq *scheme-complete-module-cache* '())
+  (setq *scheme-library-includes-cache* '()))
 
 (defun scheme-module-exports (mod)
   (unless (member mod *scheme-imported-modules*)
@@ -3988,7 +3989,9 @@ at that location, and `beep' will just beep and do nothing."
     (t
      (list '() '()))))
 
-(defun scheme-library-includes (base &optional flatp)
+(defvar *scheme-library-includes-cache* nil)
+
+(defun scheme-library-includes/uncached (base &optional flatp)
   (let ((decls '())
         (files '()))
     (when (file-exists-p base)
@@ -4005,6 +4008,27 @@ at that location, and `beep' will just beep and do nothing."
                 (setq files (append files (cadr includes))))
               (scheme-goto-next-top-level (not flatp)))))))
     (list decls files)))
+
+(defun scheme-library-includes (base &optional flatp)
+  (let ((cached (and (not flatp)
+                     (assoc base *scheme-library-includes-cache*))))
+    ;; remove stale caches
+    (when (and cached
+               (ignore-errors
+                 (let ((mtime (nth 5 (file-attributes base)))
+                       (ptime (cadr cached)))
+                   (or (> (car mtime) (car ptime))
+                       (and (= (car mtime) (car ptime))
+                            (> (cadr mtime) (cadr ptime)))))))
+      (setq *scheme-library-includes-cache*
+            (scheme-assoc-delete-all base *scheme-library-includes-cache*))
+      (setq cached nil))
+    (if cached
+        (cddr cached)
+      (let ((res (scheme-library-includes/uncached base flatp)))
+        (push (cons base (cons (nth 5 (file-attributes base)) res))
+              *scheme-library-includes-cache*)
+        res))))
 
 (defun scheme-library-include-type (base file)
   (let ((decls+files (scheme-library-includes base)))

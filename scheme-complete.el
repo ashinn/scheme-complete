@@ -1,7 +1,7 @@
-;;; scheme-complete.el --- Smart tab completion for Scheme in Emacs
+;;; scheme-complete.el --- Smart auto completion for Scheme in Emacs
 
 ;;; Author: Alex Shinn
-;;; Version: 0.9.4
+;;; Version: 0.9.5
 
 ;;; This code is written by Alex Shinn and placed in the Public
 ;;; Domain.  All warranties are disclaimed.
@@ -60,6 +60,7 @@
 ;;; That's all there is to it.
 
 ;;; History:
+;;;  0.9.5: 2017/04/02 - completiong for only/except/export, better caching
 ;;;  0.9.4: 2017/04/01 - don't open non-existant files
 ;;;  0.9.3: 2016/06/04 - string-cursors, bugfixes, speedups, introducing
 ;;:                      unit tests with ert
@@ -2645,7 +2646,7 @@ at that location, and `beep' will just beep and do nothing."
        (< i (length *scheme-srfi-info*))
        (let ((info (cdr (aref *scheme-srfi-info* i))))
          (if (and (consp info) (null (cdr info)) (symbolp (car info)))
-             (scheme-module-exports (car info))
+             (scheme-module-exports/compute (car info))
            info))))
 
 (defvar scheme-module-exports-function nil
@@ -3664,8 +3665,9 @@ at that location, and `beep' will just beep and do nothing."
                (let* ((files (cdr (scheme-nth-sexp-at-point 0)))
                       (defs (scheme-append-map
                              #'(lambda (file)
-                                 (scheme-with-find-file file
-                                   (scheme-current-globals env)))
+                                 (ignore-errors
+                                   (scheme-with-find-file file
+                                     (scheme-current-globals env))))
                              files)))
                  (setq res (append defs res))))
               ((begin)
@@ -3728,7 +3730,7 @@ at that location, and `beep' will just beep and do nothing."
                (let ((parents (cdr (scheme-nth-sexp-at-point 0))))
                  (setq res (nconc (mapcar #'car
                                           (scheme-append-map
-                                           #'scheme-module-exports
+                                           #'scheme-module-exports/gauche
                                            parents))
                                   res))))
               ((module)
@@ -4097,12 +4099,33 @@ at that location, and `beep' will just beep and do nothing."
       ((r7rs-library-declaration)
        (let ((enclosing (scheme-enclosing-2-sexp-prefixes)))
          (cond
-          ((eq 'import (caddr enclosing))
+          ((and (eq 'import (caddr enclosing))
+                (> (cadr enclosing) 1)
+                (memq (car enclosing) '(only except)))
+           (let* ((lib (save-excursion
+                         (when (eq ?w (char-syntax (char-before (point))))
+                           (scheme-beginning-of-sexp))
+                         (dotimes (i (- (cadr enclosing) 1))
+                           (backward-sexp))
+                         (scheme-nth-sexp-at-point 0)))
+                  (exports (and lib (scheme-module-exports/compute lib))))
+             (list exports)))
+          ((memq (caddr enclosing) '(import only except))
            (list (mapcar #'list
-                         (mapcar #'intern
-                                 (scheme-library-completions
-                                  (scheme-preceding-sexps))))))
+                         (append
+                          (and (= 0 (cadr enclosing))
+                               '(only except rename prefix drop-prefix))
+                          (mapcar #'intern
+                                  (scheme-library-completions
+                                   (scheme-preceding-sexps)))))))
           ((eq 'import (car enclosing)) nil)
+          ((eq 'export (car enclosing))
+           (let* ((imports (ignore-errors (scheme-current-imports)))
+                  (globals (ignore-errors
+                             (scheme-current-globals (list imports))))
+                  (exports (scheme-current-exports)))
+             (list (mapcar #'list (remove-if #'(lambda (x) (memq (car x) exports))
+                                             (append imports globals))))))
           (t (list *scheme-r7rs-lib-decl-info*)))))
       ((r5rs)
        (let* ((env (if base

@@ -1,7 +1,7 @@
 ;;; scheme-complete.el --- Smart auto completion for Scheme in Emacs
 
 ;;; Author: Alex Shinn
-;;; Version: 0.9.5
+;;; Version: 0.9.6
 
 ;;; This code is written by Alex Shinn and placed in the Public
 ;;; Domain.  All warranties are disclaimed.
@@ -60,6 +60,7 @@
 ;;; That's all there is to it.
 
 ;;; History:
+;;;  0.9.6: 2017/04/10 - fix possible inf loop in enclosing-2-sexp-prefixes
 ;;;  0.9.5: 2017/04/02 - completiong for only/except/export, better caching
 ;;;  0.9.4: 2017/04/01 - don't open non-existant files
 ;;;  0.9.3: 2016/06/04 - string-cursors, bugfixes, speedups, introducing
@@ -3037,8 +3038,9 @@ at that location, and `beep' will just beep and do nothing."
       (if (scheme-in-comment-p)
           (comment-search-backward))
       (skip-syntax-backward "w_")
-      (while (and (not (bobp)) (not (eq ?\( (char-before))))
-        (scheme-beginning-of-sexp)
+      (while (and (not (bobp))
+                  (not (eq ?\( (char-before)))
+                  (scheme-beginning-of-sexp))
         (incf pos))
       pos)))
 

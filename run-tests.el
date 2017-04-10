@@ -29,3 +29,8 @@
     (should-complete 227 "colon")
     (should-complete 229 "len")
     (should-complete 237 "len")))
+
+(ert-deftest sc-test-enclosing-2-sexp-prefixes ()
+  "Tests scheme-enclosing-2-sexp-prefixes bug"
+  (scheme-with-find-file "tests/t-dolphin.scm"
+    (should-complete 210 "remainder")))

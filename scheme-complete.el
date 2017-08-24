@@ -2808,13 +2808,13 @@ at that location, and `beep' will just beep and do nothing."
     (let ((cached (gethash mod *scheme-complete-module-cache*)))
       ;; check cache
       (if (and cached
-               (stringp (cadr cached))
+               (stringp (car cached))
                (not
                 (ignore-errors
-                  (let ((mtime (nth 5 (file-attributes (cadr cached))))
-                        (ptime (caddr cached)))
+                  (let ((mtime (nth 5 (file-attributes (car cached))))
+                        (ptime (cadr cached)))
                     (scheme-mtime>? mtime ptime)))))
-          (cadddr cached)
+          (caddr cached)
         ;; (re)compute module exports
         (let ((export-fun
                (if (consp mod)
@@ -4060,9 +4060,9 @@ at that location, and `beep' will just beep and do nothing."
                (not
                 (ignore-errors
                   (let ((mtime (nth 5 (file-attributes base)))
-                        (ptime (cadr cached)))
+                        (ptime (car cached)))
                     (scheme-mtime>? mtime ptime)))))
-        (cddr cached)
+        (cdr cached)
       (let ((res (scheme-library-includes/uncached base flatp)))
         (puthash base
                  (cons (nth 5 (file-attributes base)) res)

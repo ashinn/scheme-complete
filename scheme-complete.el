@@ -4668,8 +4668,8 @@ at that location, and `beep' will just beep and do nothing."
   (with-output-to-string (princ sexp)))
 
 (defun scheme-get-current-symbol-info ()
-  (let* ((sym (eldoc-current-symbol))
-         (fnsym0 (eldoc-fnsym-in-current-sexp))
+  (let* ((sym (elisp--current-symbol))
+         (fnsym0 (elisp--fnsym-in-current-sexp))
          (fnsym (if (consp fnsym0) (car fnsym0) fnsym0))
          (env (save-excursion
                 (if (scheme-in-string-p) (scheme-beginning-of-string))

@@ -1,7 +1,7 @@
 ;;; scheme-complete.el --- Smart auto completion for Scheme in Emacs
 
 ;;; Author: Alex Shinn
-;;; Version: 0.9.7
+;;; Version: 0.9.8
 
 ;;; This code is written by Alex Shinn and placed in the Public
 ;;; Domain.  All warranties are disclaimed.
@@ -60,6 +60,7 @@
 ;;; That's all there is to it.
 
 ;;; History:
+;;;  0.9.8: 2018/10/29 - replace old eldoc symbol functions with elisp equivs
 ;;;  0.9.7: 2017/08/24 - improving caching, adding some missing (scheme char)
 ;;;                       bindings
 ;;;  0.9.6: 2017/04/10 - fix possible inf loop in enclosing-2-sexp-prefixes
@@ -4668,8 +4669,8 @@ at that location, and `beep' will just beep and do nothing."
   (with-output-to-string (princ sexp)))
 
 (defun scheme-get-current-symbol-info ()
-  (let* ((sym (eldoc-current-symbol))
-         (fnsym0 (eldoc-fnsym-in-current-sexp))
+  (let* ((sym (elisp--current-symbol))
+         (fnsym0 (elisp--fnsym-in-current-sexp))
          (fnsym (if (consp fnsym0) (car fnsym0) fnsym0))
          (env (save-excursion
                 (if (scheme-in-string-p) (scheme-beginning-of-string))

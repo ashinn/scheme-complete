@@ -1,7 +1,7 @@
 ;;; scheme-complete.el --- Smart auto completion for Scheme in Emacs
 
 ;;; Author: Alex Shinn
-;;; Version: 0.9.8
+;;; Version: 0.9.9
 
 ;;; This code is written by Alex Shinn and placed in the Public
 ;;; Domain.  All warranties are disclaimed.
@@ -60,6 +60,7 @@
 ;;; That's all there is to it.
 
 ;;; History:
+;;;  0.9.9: 2020/06/30 - add support for alias-for, add `scheme-insert-globals'
 ;;;  0.9.8: 2018/10/29 - replace old eldoc symbol functions with elisp equivs
 ;;;  0.9.7: 2017/08/24 - improving caching, adding some missing (scheme char)
 ;;;                       bindings
@@ -240,7 +241,8 @@ at that location, and `beep' will just beep and do nothing."
     (import (special list scheme-available-modules))
     (include (syntax filename \.\.\.))
     (include-ci (syntax filename \.\.\.))
-    (include-library-declarations (syntax filename \.\.\.))))
+    (include-library-declarations (syntax filename \.\.\.))
+    (alias-for (special list scheme-available-modules))))
 
 (defvar *scheme-r7rs-info*
   `(((scheme base)
@@ -3672,13 +3674,13 @@ at that location, and `beep' will just beep and do nothing."
          (mtime (nth 5 (file-attributes file)))
          (cached (gethash key *scheme-include-globals-cache*)))
     (if (and cached
-             (not (or (and mtime (scheme-mtime>? mtime (caadr cached)))
+             (not (or (and mtime (scheme-mtime>? mtime (car cached)))
                       (let ((buf (get-buffer file)))
                         (and buf
                              (equal (buffer-file-name buf)
                                     (file-truename file))
                              (buffer-modified-p buf))))))
-        (caddr cached)
+        (cadr cached)
       (let ((res (ignore-errors
                    (scheme-with-find-file file
                      (scheme-current-globals env)))))
@@ -3719,6 +3721,12 @@ at that location, and `beep' will just beep and do nothing."
                  (setq res
                        (append (ignore-errors (scheme-extract-definitions env))
                                res))))
+              ((alias-for extends)
+               (if in-mod-p
+                   (let ((mod (cadr (scheme-nth-sexp-at-point 0))))
+                     (setq res
+                           (append (ignore-errors (scheme-module-exports mod))
+                                   res)))))
               (t
                (unless (eq (point) skip)
                  (setq res
@@ -4706,6 +4714,22 @@ at that location, and `beep' will just beep and do nothing."
               (scheme-sexp-to-string type)))
             (if (and (not (nth 3 spec)) (nth 4 spec)) " - " "")
             (or (nth 4 spec) ""))))))
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; utilities
+
+(defun scheme-insert-globals ()
+  "Inserts the current top-level bindings at point."
+  (interactive)
+  (when (looking-back "export-all\\s-*")
+    (backward-kill-word 1)
+    (backward-delete-char 1))
+  (let ((col (+ 1 (current-column))))
+    (save-mark-and-excursion
+     (set-mark (point))
+     (mapcar #'(lambda (x) (insert " ") (insert (symbol-name (car x))))
+             (scheme-current-globals))
+     (fill-paragraph nil t)
+     (indent-region (mark) (point) col))))
 
 (provide 'scheme-complete)
 

@@ -111,11 +111,13 @@
 ;;;   'releases'. Our software 'escapes' leaving a bloody trail of
 ;;;   designers and quality assurance people in its wake.
 
-(require 'cl)
+;;; Code:
+
+(require 'cl-lib)
 
 ;; this is just to eliminate some warnings when compiling - this file
 ;; should be loaded after 'scheme
-(eval-when (compile)
+(cl-eval-when (compile)
   (require 'scheme))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -124,6 +126,11 @@
 ;; heuristics.  Alternately, in any given buffer, just
 ;;
 ;; (setq *scheme-current-implementation* whatever)
+
+(defvar *scheme-imported-modules* '())
+(defvar *scheme-complete-module-cache* (make-hash-table :test #'equal))
+(defvar *scheme-library-includes-cache* (make-hash-table :test #'equal))
+(defvar *scheme-include-globals-cache* (make-hash-table :test #'equal))
 
 (defvar *scheme-current-implementation* nil)
 (make-variable-buffer-local '*scheme-current-implementation*)
@@ -2638,12 +2645,14 @@ at that location, and `beep' will just beep and do nothing."
 
 ;; visit a file and kill the buffer only if it wasn't already open
 (defmacro scheme-with-find-file (path-expr &rest body)
+  "Visit a file PATH-EXPR, execute BODY, and kill the buffer only if it wasn't already open."
+  (declare (debug (form &rest form)))
   (let ((path (gensym "path"))
         (buf0 (gensym "buf"))
         (buf (gensym "buf")))
     `(save-window-excursion
        (let* ((,path (file-truename ,path-expr))
-              (,buf0 (find-if
+              (,buf0 (cl-find-if
                       #'(lambda (x)
                           (let ((buf-file (buffer-file-name x)))
                             (and buf-file
@@ -2652,7 +2661,7 @@ at that location, and `beep' will just beep and do nothing."
               (,buf (or ,buf0 (and (file-exists-p ,path)
                                    (find-file-noselect ,path t)))))
          (unless ,buf
-           (error "no such file" ,path))
+           (error "No such file: %s" ,path))
          (set-buffer ,buf)
          (unwind-protect
              (save-excursion
@@ -2678,8 +2687,8 @@ at that location, and `beep' will just beep and do nothing."
 
 (defun scheme-fixup-path (path)
   (and (consp path)
-       (delete-duplicates
-        (remove-if-not #'(lambda (dir)
+       (cl-delete-duplicates
+        (cl-remove-if-not #'(lambda (dir)
                            (and (stringp dir)
                                 (not (equal dir ""))
                                 (or (string-prefix-p "./" dir)
@@ -2692,7 +2701,7 @@ at that location, and `beep' will just beep and do nothing."
 (defvar *scheme-gauche-site-repo-path* 'compute-me-later)
 
 (defun scheme-library-path (impl)
-  (case impl
+  (cl-case impl
     ((chibi)
      (when (not (listp *scheme-chibi-repo-path*))
        (setq *scheme-chibi-repo-path*
@@ -2873,7 +2882,7 @@ at that location, and `beep' will just beep and do nothing."
              #'(lambda (x)
                  (cons (intern (car (split-string (substring x 1))))
                        '((lambda ()))))
-             (remove-if-not
+             (cl-remove-if-not
               #'(lambda (x) (string-match (concat " " mod-str ")") x))
               (scheme-file->lines modules-db))))))))
 
@@ -2895,7 +2904,7 @@ at that location, and `beep' will just beep and do nothing."
     (mapcar
      #'(lambda (f)
          (let ((f (file-name-sans-extension f)))
-           (if (equalp "import" (file-name-extension f))
+           (if (cl-equalp "import" (file-name-extension f))
                (file-name-sans-extension f)
              f)))
      (directory-files "." nil "^[^.].*\\.scm$" t))
@@ -2904,7 +2913,7 @@ at that location, and `beep' will just beep and do nothing."
          (mapcar
           #'(lambda (f)
               (let ((f (file-name-sans-extension f)))
-                (if (equalp "import" (file-name-extension f))
+                (if (cl-equalp "import" (file-name-extension f))
                     (file-name-sans-extension f)
                   f)))
           (if (string-match "/7" dir)
@@ -2946,7 +2955,7 @@ at that location, and `beep' will just beep and do nothing."
         path))))))
 
 (defun scheme-available-modules (&optional impl)
-  (case impl
+  (cl-case impl
     ((chicken) (scheme-chicken-available-modules impl))
     ((gauche) (scheme-gauche-available-modules impl))
     (t (scheme-r7rs-available-modules impl))))
@@ -2958,10 +2967,10 @@ at that location, and `beep' will just beep and do nothing."
              (str (cond ((symbolp s) (symbol-name s))
                         ((numberp s) (number-to-string s))
                         (t s))))
-        (setq libs (mapcar #'cdr (remove-if-not
+        (setq libs (mapcar #'cdr (cl-remove-if-not
                                   #'(lambda (x) (equal str (car x)))
                                   libs)))))
-    (remove-duplicates (remove nil (mapcar #'car libs)) :test #'equal)))
+    (cl-remove-duplicates (remove nil (mapcar #'car libs)) :test #'equal)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; utilities
@@ -3016,7 +3025,7 @@ at that location, and `beep' will just beep and do nothing."
          (and (> len 0) (substring res 0 (- len 1))))))
 
 (defun scheme-find-file-in-path (file path)
-  (car (remove-if-not
+  (car (cl-remove-if-not
         #'(lambda (dir) (file-exists-p (concat dir "/" file)))
         path)))
 
@@ -3031,18 +3040,18 @@ at that location, and `beep' will just beep and do nothing."
         (setq depth (car x))
         (while (consp dirs)
           (let* ((dir (pop dirs))
-                 (files (remove-if #'(lambda (f) (string-prefix-p "." f))
+                 (files (cl-remove-if #'(lambda (f) (string-prefix-p "." f))
                                    (directory-files dir)))
                  (full-files (mapcar #'(lambda (f) (concat dir "/" f)) files))
                  (matches (if match
-                              (remove-if-not
+                              (cl-remove-if-not
                                #'(lambda (f) (string-match match f))
                                (if full full-files files))
                             (if full full-files files))))
             (setq res (append matches res))
             (when (or (not maxdepth) (consp matches) (< depth maxdepth))
               (push (cons (+ depth 1)
-                          (remove-if-not #'file-directory-p full-files))
+                          (cl-remove-if-not #'file-directory-p full-files))
                     stack))))))
     res))
 
@@ -3062,7 +3071,7 @@ at that location, and `beep' will just beep and do nothing."
       (while (and (not (bobp))
                   (not (eq ?\( (char-before)))
                   (scheme-beginning-of-sexp))
-        (incf pos))
+        (cl-incf pos))
       pos)))
 
 (defun scheme-beginning-of-next-sexp ()
@@ -3171,7 +3180,7 @@ at that location, and `beep' will just beep and do nothing."
 ;; variable extraction
 
 (defun scheme-sexp-type-at-point (&optional env)
-  (case (and (not (eobp)) (char-syntax (char-after)))
+  (cl-case (and (not (eobp)) (char-syntax (char-after)))
     ((?\()
      (forward-char 1)
      (if (memq (char-syntax (char-after)) '(?w ?_))
@@ -3238,7 +3247,7 @@ at that location, and `beep' will just beep and do nothing."
         '()
       (list (list x))))
    ((consp x)
-    (case (car x)
+    (cl-case (car x)
       ((or not)
        (scheme-extract-match-clause-vars (cdr x)))
       ((and)
@@ -3266,10 +3275,10 @@ at that location, and `beep' will just beep and do nothing."
       ((quote) '())
       ((quasiquote) '())                ; XXXX
       (t
-       (union (scheme-extract-match-clause-vars (car x))
+       (cl-union (scheme-extract-match-clause-vars (car x))
               (scheme-extract-match-clause-vars (cdr x))))))
    ((vectorp x)
-    (scheme-extract-match-clause-vars (concatenate 'list x)))
+    (scheme-extract-match-clause-vars (cl-concatenate 'list x)))
    (t
     '())))
 
@@ -3348,7 +3357,7 @@ at that location, and `beep' will just beep and do nothing."
                    (eq ?w (char-syntax (char-after (point)))))
           (setq scan-internal t)
           (let ((sym (scheme-symbol-at-point)))
-            (case sym
+            (cl-case sym
               ((lambda)
                (setq vars
                      (append
@@ -3406,7 +3415,7 @@ at that location, and `beep' will just beep and do nothing."
                               #'list
                               (scheme-append-map
                                #'scheme-flatten
-                               (remove-if-not #'consp
+                               (cl-remove-if-not #'consp
                                               (scheme-nth-sexp-at-point 1))))
                              vars)))
               ((receive defun defmacro)
@@ -3447,7 +3456,7 @@ at that location, and `beep' will just beep and do nothing."
     (reverse vars)))
 
 (defun scheme-extract-import-module-imports (sexp)
-  (case (and (consp sexp) (car sexp))
+  (cl-case (and (consp sexp) (car sexp))
     ((prefix prefix-in)
      (let* ((ids (scheme-extract-import-module-imports (cadr sexp)))
             (prefix0 (caddr sexp))
@@ -3474,10 +3483,10 @@ at that location, and `beep' will just beep and do nothing."
                    (cons (or (cadr (assq (car x) renames)) (car x)) (cdr x)))
                (scheme-extract-import-module-imports (cadr sexp)))))
     ((except except-in)
-     (remove-if #'(lambda (x) (memq (car x) (cddr sexp)))
+     (cl-remove-if #'(lambda (x) (memq (car x) (cddr sexp)))
                 (scheme-extract-import-module-imports (cadr sexp))))
     ((only only-in)
-     (remove-if-not
+     (cl-remove-if-not
       #'(lambda (x) (memq (car x) (cddr sexp)))
       (scheme-extract-import-module-imports (cadr sexp))))
     ((import import-for-syntax require)
@@ -3497,7 +3506,7 @@ at that location, and `beep' will just beep and do nothing."
      (scheme-module-exports sexp))))
 
 (defun scheme-extract-sexp-imports (sexp)
-  (case (and (consp sexp) (car sexp))
+  (cl-case (and (consp sexp) (car sexp))
     ((begin define-module)
      (scheme-append-map #'scheme-extract-sexp-imports (cdr sexp)))
     ((cond-expand)
@@ -3523,7 +3532,7 @@ at that location, and `beep' will just beep and do nothing."
               (scheme-current-globals)))))
     ((library module)
      (scheme-append-map #'scheme-extract-import-module-imports
-                        (remove-if #'(lambda (x)
+                        (cl-remove-if #'(lambda (x)
                                        (memq (car x) '(import require)))
                                    (cdr sexp))))
     ))
@@ -3603,7 +3612,7 @@ at that location, and `beep' will just beep and do nothing."
     (let ((sym (ignore-errors (and (eq ?\( (char-syntax (char-after)))
                                    (progn (forward-char)
                                           (scheme-symbol-at-point))))))
-      (case sym
+      (cl-case sym
         ((define-syntax define-compiled-syntax defmacro define-macro)
          (list (list (scheme-name-of-define) '(syntax))))
         ((define define-inline define-constant define-primitive defun)
@@ -3702,7 +3711,7 @@ at that location, and `beep' will just beep and do nothing."
         (when (and (eq ?\( (char-syntax (char-after)))
                    (eq ?w (char-syntax (char-after (1+ (point))))))
           (let ((sym (save-excursion (forward-char) (scheme-symbol-at-point))))
-            (case sym
+            (cl-case sym
               ((module define-module define-library)
                (setq in-mod-p t)
                (forward-char))
@@ -3759,7 +3768,7 @@ at that location, and `beep' will just beep and do nothing."
         (when (and (eq ?\( (char-syntax (char-after)))
                    (eq ?w (char-syntax (char-after (1+ (point))))))
           (let ((sym (save-excursion (forward-char) (scheme-symbol-at-point))))
-            (case sym
+            (cl-case sym
               ((define-module define-library)
                (setq in-mod-p t)
                (forward-char))
@@ -3785,7 +3794,7 @@ at that location, and `beep' will just beep and do nothing."
                    (goto-char (point-max)))
                   ((listp x)
                    (setq res
-                         (nconc (remove-if-not #'symbolp (cdr x)) res)))))))))
+                         (nconc (cl-remove-if-not #'symbolp (cdr x)) res)))))))))
         (scheme-goto-next-top-level in-mod-p)))
     res))
 
@@ -3798,10 +3807,10 @@ at that location, and `beep' will just beep and do nothing."
          (env (append imports globals))
          (typed-exports
           (if exports
-              (remove-if-not #'(lambda (x) (memq (car x) exports)) env)
+              (cl-remove-if-not #'(lambda (x) (memq (car x) exports)) env)
             env))
          (undefined-exports
-          (remove-if #'(lambda (x) (assq x typed-exports)) exports)))
+          (cl-remove-if #'(lambda (x) (assq x typed-exports)) exports)))
     ;;(message "exports: %s" exports)
     (append typed-exports
             (mapcar #'(lambda (x) (list x 'object)) undefined-exports))))
@@ -3817,7 +3826,7 @@ at that location, and `beep' will just beep and do nothing."
 (defun scheme-translate-type (type)
   (if (not (symbolp type))
       type
-    (case type
+    (cl-case type
       ((pred proc thunk handler dispatch producer consumer f fn g kons)
        'procedure)
       ((num) 'number)
@@ -3873,7 +3882,7 @@ at that location, and `beep' will just beep and do nothing."
     (while (and (consp spec) (<= i pos))
       (cond
        ((eq :optional (car spec))
-        (decf i))
+        (cl-decf i))
        ((= i pos)
         (setq type (car spec))
         (setq spec nil))
@@ -3881,13 +3890,13 @@ at that location, and `beep' will just beep and do nothing."
         (setq type (car spec))
         (setq spec nil)))
       (setq spec (cdr spec))
-      (incf i))
+      (cl-incf i))
     (if type
         (setq type (scheme-translate-type type)))
     type))
 
 (defun scheme-predicate->type (pred)
-  (case pred
+  (cl-case pred
     ((even? odd?) 'integer)
     ((char-upper-case? char-lower-case?
       char-alphabetic? char-numeric? char-whitespace?)
@@ -3904,7 +3913,7 @@ at that location, and `beep' will just beep and do nothing."
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; completion
 
-(eval-when (compile load eval)
+(cl-eval-when (compile load eval)
   (unless (fboundp 'event-matches-key-specifier-p)
     (defalias 'event-matches-key-specifier-p 'eq)))
 
@@ -4015,7 +4024,7 @@ at that location, and `beep' will just beep and do nothing."
     res))
 
 (defun scheme-library-decl-includes (decl base)
-  (case (and (consp decl) (car decl))
+  (cl-case (and (consp decl) (car decl))
     ((include include-ci)
      (list '()
            (mapcar #'(lambda (f) (concat (file-name-directory base) f))
@@ -4106,7 +4115,7 @@ at that location, and `beep' will just beep and do nothing."
   (let* ((sld (concat (file-name-sans-extension file)
                       *scheme-r7rs-extension*))
          (include-type (scheme-library-include-type sld file)))
-    (unless (or include-type (equalp file sld))
+    (unless (or include-type (cl-equalp file sld))
       (let ((dir (file-name-directory file))
             (count 0)
             (sld-pat
@@ -4120,7 +4129,7 @@ at that location, and `beep' will just beep and do nothing."
               (when include-type
                 (setq sld-ls '()
                       dir "/"))))
-          (incf count)
+          (cl-incf count)
           (setq dir (file-name-directory
                      (replace-regexp-in-string "/+\\'" "" dir))))))
     (if include-type
@@ -4133,7 +4142,7 @@ at that location, and `beep' will just beep and do nothing."
          (lang (car lang+base))
          (base (cadr lang+base)))
     ;; base language
-    (case lang
+    (cl-case lang
       ((r7rs-library-declaration)
        (let ((enclosing (scheme-enclosing-2-sexp-prefixes)))
          (cond
@@ -4162,7 +4171,7 @@ at that location, and `beep' will just beep and do nothing."
                   (globals (ignore-errors
                              (scheme-current-globals (list imports))))
                   (exports (scheme-current-exports)))
-             (list (mapcar #'list (remove-if #'(lambda (x) (memq (car x) exports))
+             (list (mapcar #'list (cl-remove-if #'(lambda (x) (memq (car x) exports))
                                              (append imports globals))))))
           (t (list *scheme-r7rs-lib-decl-info*)))))
       ((r5rs)
@@ -4206,9 +4215,9 @@ at that location, and `beep' will just beep and do nothing."
 
 (defun scheme-env-filter (pred env)
   (mapcar #'car
-          (apply #'concatenate
+          (apply #'cl-concatenate
                  'list
-                 (mapcar #'(lambda (e) (remove-if-not pred e)) env))))
+                 (mapcar #'(lambda (e) (cl-remove-if-not pred e)) env))))
 
 ;; checking return values:
 ;;   a should be capable of returning instances of b
@@ -4221,7 +4230,7 @@ at that location, and `beep' will just beep and do nothing."
              (eq b1 'object)        ; ... or b can receive anything
              (if (symbolp a1)
                  (if (symbolp b1)
-                     (case a1           ; ... or the types overlap
+                     (cl-case a1           ; ... or the types overlap
                        ((number complex real rational integer)
                         (memq b1 '(number complex real rational integer)))
                        ((port input-port output-port)
@@ -4234,7 +4243,7 @@ at that location, and `beep' will just beep and do nothing."
                     (consp b1)
                     (if (eq 'or (car b1))
                         ;; type unions
-                        (find-if
+                        (cl-find-if
                          #'(lambda (x)
                              (scheme-type-match-p
                               a1 (scheme-translate-type x)))
@@ -4243,10 +4252,10 @@ at that location, and `beep' will just beep and do nothing."
                         (and (not (equal b1 b2))
                              (scheme-type-match-p a1 b2))))))
                (and (consp a1)
-                    (case (car a1)
+                    (cl-case (car a1)
                       ((or)
                        ;; type unions
-                       (find-if
+                       (cl-find-if
                         #'(lambda (x)
                             (scheme-type-match-p (scheme-translate-type x) b1))
                         (cdr a1)))
@@ -4274,7 +4283,7 @@ at that location, and `beep' will just beep and do nothing."
 (defun scheme-translate-special-type (x)
   (if (not (consp x))
       x
-    (case (car x)
+    (cl-case (car x)
       ((list string) (car x))
       ((set special) (cadr x))
       ((flags) 'integer)
@@ -4373,10 +4382,10 @@ at that location, and `beep' will just beep and do nothing."
          (dir (file-name-directory sym))
          (res (file-name-all-completions file (or dir ".")))
          (res2 (if dir (mapcar #'(lambda (f) (concat dir f)) res) res)))
-    (remove-if-not #'file-directory-p res2)))
+    (cl-remove-if-not #'file-directory-p res2)))
 
 (defun scheme-string-completer (type)
-  (case type
+  (cl-case type
     ((filename)
      '(scheme-complete-file-name file-name-nondirectory))
     ((directory)
@@ -4516,7 +4525,7 @@ at that location, and `beep' will just beep and do nothing."
       (let* ((param-type (scheme-lookup-type (cadr inner-type) inner-pos))
              (set-or-flags
               (or (and (consp param-type)
-                       (case (car param-type)
+                       (cl-case (car param-type)
                          ((set) (cddr param-type))
                          ((flags) (cdr param-type))))
                   ;; handle nested arithmetic functions inside a flags
@@ -4577,11 +4586,11 @@ at that location, and `beep' will just beep and do nothing."
           (if (or (and (not (bobp))
                        (eq ?w (char-syntax (char-before))))
                   (and (not (and (looking-at "\\s-*$")
-                                 (looking-back ")")))
+                                 (looking-back ")" nil)))
                        (save-excursion
                             (beginning-of-line)
                             (re-search-forward "\\S-" end t))
-                       (case scheme-complete-empty-tab-behavior
+                       (cl-case scheme-complete-empty-tab-behavior
                          ((indent) nil)
                          ((beep) (beep))
                          (t t))))
@@ -4657,7 +4666,7 @@ at that location, and `beep' will just beep and do nothing."
 (defun scheme-base-type (x)
   (if (not (consp x))
       x
-    (case (car x)
+    (cl-case (car x)
       ((string list) (car x))
       ((set) (or (cadr x) (car x)))
       ((flags) 'integer)

@@ -302,7 +302,7 @@ at that location, and `beep' will just beep and do nothing."
      (define-syntax (syntax (identifier body \.\.\.) undefined) "create a macro")
      (define (syntax (identifier value) undefined) "define a new variable")
      (define-values (syntax (identifier \.\.\.) expr))
-     (define-record-type (syntax name (make field \.\.\.) pred-name (field get set) \.\.\.))
+     (define-record-type (syntax (name (make field \.\.\.) pred-name (field get set) \.\.\.)) undefined)
      (denominator (lambda (rational) n))
      (do (syntax (vars finish body \.\.\.)) "simple iterator")
      (dynamic-wind (lambda (before-thunk thunk after-thunk) obj))

@@ -1,7 +1,7 @@
 ;;; scheme-complete.el --- Smart auto completion for Scheme in Emacs
 
 ;;; Author: Alex Shinn
-;;; Version: 0.9.9
+;;; Version: 0.9.10
 
 ;;; This code is written by Alex Shinn and placed in the Public
 ;;; Domain.  All warranties are disclaimed.
@@ -60,6 +60,8 @@
 ;;; That's all there is to it.
 
 ;;; History:
+;;; 0.9.10: 2024/12/05 - add SRFI 227, fix rename exports, don't add implicitly
+;;;                       opened files to file-name-history
 ;;;  0.9.9: 2020/06/30 - add support for alias-for, add `scheme-insert-globals'
 ;;;  0.9.8: 2018/10/29 - replace old eldoc symbol functions with elisp equivs
 ;;;  0.9.7: 2017/08/24 - improving caching, adding some missing (scheme char)
@@ -1718,6 +1720,24 @@ at that location, and `beep' will just beep and do nothing."
     (string-replace (lambda (str1 str2 start1 end1 :optional start2 end2) str))
     )
 
+   () () () () () () () () ()     ; 131-139
+   () () () () () () () () () ()  ; 140-149
+   () () () () () () () () () ()  ; 150-159
+   () () () () () () () () () ()  ; 160-169
+   () () () () () () () () () ()  ; 170-179
+   () () () () () () () () () ()  ; 180-189
+   () () () () () () () () () ()  ; 190-199
+   () () () () () () () () () ()  ; 200-209
+   () () () () () () () () () ()  ; 210-219
+   () () () () () () ()           ; 220-226
+
+   ("Optional arguments"
+    (opt-lambda (syntax (params body \.\.\.)) "lambda with optional arguments")
+    (opt*-lambda (syntax (params body \.\.\.)) "lambda with optional arguments")
+    (let-optionals (syntax (list vars body \.\.\.)) "bind variables optionally")
+    (let-optionals* (syntax (list vars body \.\.\.)) "bind variables optionally")
+    )
+
    ])
 
 ;; another big table - consider moving to a separate file
@@ -2652,7 +2672,9 @@ at that location, and `beep' will just beep and do nothing."
                                  (equal ,path (file-truename buf-file)))))
                       (buffer-list)))
               (,buf (or ,buf0 (and (file-exists-p ,path)
-                                   (find-file-noselect ,path t)))))
+                                   (prog1 (find-file-noselect ,path t)
+                                     (when (equal ,path (car file-name-history))
+                                       (pop file-name-history)))))))
          (unless ,buf
            (error "no such file" ,path))
          (set-buffer ,buf)
@@ -3351,10 +3373,10 @@ at that location, and `beep' will just beep and do nothing."
           (setq scan-internal t)
           (let ((sym (scheme-symbol-at-point)))
             (case sym
-              ((lambda)
+              ((lambda opt-lambda opt*-lambda)
                (setq vars
                      (append
-                      (mapcar #'list
+                      (mapcar #'(lambda (v) (list (if (consp v) (car v) v)))
                               (scheme-flatten (scheme-nth-sexp-at-point 1)))
                       vars)))
               ((match match-let match-let*)
@@ -3381,11 +3403,14 @@ at that location, and `beep' will just beep and do nothing."
                              limit))))
                       vars)))
               ((let let* letrec letrec* let-syntax letrec-syntax
-                    and-let* do loop)
+                    and-let* do loop let-optionals let-optionals*
+                    let-keywords let-keywords*)
                (or
                 (ignore-errors
                   (save-excursion
                     (scheme-beginning-of-next-sexp)
+                    (if (memq sym '(let-optionals let-optionals* let-keywords let-keywords*))
+                        (scheme-beginning-of-next-sexp))
                     (let* ((loop-name
                             (and (memq sym '(let loop))
                                  (eq ?w (char-syntax (char-after (point))))
@@ -3774,7 +3799,13 @@ at that location, and `beep' will just beep and do nothing."
               ((export provide)
                (unless (and (eq 'provide sym)
                             (eq 'chicken (scheme-current-implementation)))
-                 (setq res (nconc (cdr (scheme-nth-sexp-at-point 0)) res))))
+                 (setq res (nconc (mapcar
+                                   #'(lambda (x)
+                                       (if (and (consp x) (eq 'rename (car x)))
+                                           (caddr x)
+                                           x))
+                                   (cdr (scheme-nth-sexp-at-point 0)))
+                                  res))))
               ((export-all)
                (goto-char (point-max)))
               ((extend)
